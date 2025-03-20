@@ -13,6 +13,9 @@ from swmm.toolkit.shared_enum import SubcatchAttribute, NodeAttribute, LinkAttri
 from pyswmm import Output
 
 
+def _as_datetime(dt):
+    
+
 def aggregate_conduits_at_nodes(mdl:swmmio.Model, nodes:list[str]=None, aggregation:str="sum", attribute:str="FLOW_RATE") -> pd.DataFrame:
     """
     Retrieve aggrecated conduit results at each node. This aggregates the timeseries for upstream conduits at each node, or the downstream conduit at zero-order nodes.
