@@ -47,7 +47,9 @@ SWMM_SECTION_SUBTYPES = {
 
 ALGORITHMS = ["differential-evolution","Nelder-Mead","Powell","CG","BFGS","L-BFGS-B","TNC","COBYLA","SLSQP","trust-constr","dogleg","trust-ncg","trust-exact","trust-krylov"]
 
-SWMM_TIME_FMT = "%Y-%m-%d %H:%M:%S"
+SWMM_DATE_FMT = "%m/%d/%Y"
+SWMM_TIME_FMT = "%H:%M:%S"
+SWMM_DATETIME_FMT = SWMM_DATE_FMT + " " + SWMM_TIME_FMT
 
 LOG_TIME_FMT = "%d-%m-%y-%H%M%S"
 
@@ -73,3 +75,6 @@ CONFIG_OPTIONS = {
     "minimize_disp":bool,
     "minimize_adaptive":bool
 }
+
+
+

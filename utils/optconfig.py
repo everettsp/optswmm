@@ -10,8 +10,18 @@ class OptConfig:
     """Class to handle the configuration file for the optimization process"""
     def __init__(self, config_path):
         """initialize the configuration file"""
-        self.config_path = config_path
-        self.cfg = self.load_config()
+        self.base_model_dir:str|Path = None
+        self.calibration_dir:str|Path = None
+        self.calibration_nodes:list[str] = None
+        self.target_variables:list[str] = None
+        self.ignore_first_n:int = None
+        self.normalize:bool = True
+        self.score_function:str = None
+        self.routine:str = None
+        self.algorithm:str = None
+        self.parallel:bool = False
+        self.hierarchial:bool = False
+        self.log_every_n:int = None
         #self._standardize_config()
 
     def load_config(self):

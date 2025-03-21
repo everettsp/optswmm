@@ -1,6 +1,6 @@
 # SWMM calibration config. file
 
-routine: "dry" # TODO: implement
+routine: "dry" #
 base_model_dir: "dat/winnipeg1" # directory containing the uncalibrated model
 base_model_name: "conceptual_model_pollutant.inp" # name of the uncalibrated model
 calibration_dir: ""
@@ -10,7 +10,7 @@ start_date: None # format: 'YYYY-MM-DD HH:MM:SS'; None infers the range from the
 end_date: None
 do_parallel: False
 hierarchial: False # if True, calibrate nodes in sequence, from upstream to downstream; if False, calibrate all nodes simultaneously
-calibration_nodes: #nodes to calibrate; 'all' calibrates all nodes
+calibration_nodes: #nodes to calibrate; 'all' calibrates all nodes. Must be a subset of nodes included in the target data.
   - all
 
 warmup_length: 48 # length of warmup period in days to ignore simulation results

@@ -13,8 +13,7 @@ from swmm.toolkit.shared_enum import SubcatchAttribute, NodeAttribute, LinkAttri
 from pyswmm import Output
 
 
-def _as_datetime(dt):
-    
+
 
 def aggregate_conduits_at_nodes(mdl:swmmio.Model, nodes:list[str]=None, aggregation:str="sum", attribute:str="FLOW_RATE") -> pd.DataFrame:
     """
@@ -299,9 +298,17 @@ def foo_runswmm(inp_path:Path):
     #print("command = ", command,"\n\n") # DEBUG
     subprocess.run(command)    
 
+from defs import SWMM_DATETIME_FMT
+def get_model_datetimes(model:swmmio.Model):
+    start_datetime = model.inp.options.loc["START_DATE"].Value + " " + model.inp.options.loc["START_TIME"].Value
+    start_datetime = datetime.strptime(start_datetime, SWMM_DATETIME_FMT)
+    end_datetime = model.inp.options.loc["END_DATE"].Value + " " + model.inp.options.loc["END_TIME"].Value
+    end_datetime = datetime.strptime(end_datetime, SWMM_DATETIME_FMT)
+    return start_datetime, end_datetime
+
 def get_model_path(model:swmmio.Model, ext:str='inp', as_str=True) -> str:
     """returns the complete (absolute) filepath of a swmmio model object"""
-    if type(model) is Path or type(model) is str:
+    if isinstance(model, (Path, str)):
         print('model is already a path')
         return model
     valid_extensions = ['inp','rpt','out']
