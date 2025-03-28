@@ -11,6 +11,7 @@ import swmmio
 import yaml
 from swmm.toolkit.shared_enum import SubcatchAttribute, NodeAttribute, LinkAttribute
 from pyswmm import Output
+from swmmio import Model
 
 
 
@@ -299,12 +300,46 @@ def foo_runswmm(inp_path:Path):
     subprocess.run(command)    
 
 from defs import SWMM_DATETIME_FMT
+
+
 def get_model_datetimes(model:swmmio.Model):
     start_datetime = model.inp.options.loc["START_DATE"].Value + " " + model.inp.options.loc["START_TIME"].Value
     start_datetime = datetime.strptime(start_datetime, SWMM_DATETIME_FMT)
     end_datetime = model.inp.options.loc["END_DATE"].Value + " " + model.inp.options.loc["END_TIME"].Value
     end_datetime = datetime.strptime(end_datetime, SWMM_DATETIME_FMT)
     return start_datetime, end_datetime
+
+
+
+def set_model_datetimes(model: Model, start_datetime=None, end_datetime=None, report_step=None) -> Model:
+    """
+    Set the simulation start and end times in the model.
+
+    :param model: Model to be updated.
+    :type model: swmmio.Model object
+    :param start_time: Simulation start time.
+    :type start_time: datetime object
+    :param end_time: Simulation end time.
+    :type end_time: datetime object
+    :returns: Model with updated simulation times.
+    :rtype: swmmio.Model object
+    """
+    if start_datetime:
+        model.inp.options.loc['START_TIME'] = datetime.strftime(start_datetime, format='%H:%M:%S')
+        model.inp.options.loc['START_DATE'] = datetime.strftime(start_datetime, format='%m/%d/%Y')
+        model.inp.options.loc['REPORT_START_TIME'] = datetime.strftime(start_datetime, format='%H:%M:%S')
+        model.inp.options.loc['REPORT_START_DATE'] = datetime.strftime(start_datetime, format='%m/%d/%Y')
+
+    if end_datetime:
+        model.inp.options.loc['END_TIME'] = datetime.strftime(end_datetime, format='%H:%M:%S')
+        model.inp.options.loc['END_DATE'] = datetime.strftime(end_datetime, format='%m/%d/%Y')
+
+    if report_step:
+        model.inp.options.loc['REPORT_STEP'] = datetime.strftime(report_step, '%H:%M:%S')
+
+
+    return model
+
 
 def get_model_path(model:swmmio.Model, ext:str='inp', as_str=True) -> str:
     """returns the complete (absolute) filepath of a swmmio model object"""

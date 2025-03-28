@@ -12,20 +12,27 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import networkx as nx
+import pyswmm.simulation
 import yaml
 import swmmio
 from swmmio import Model
+from pyswmm import Simulation, Output, Nodes, Links, Subcatchments, SimulationPreConfig
+
+from swmm.toolkit import shared_enum
+
+
 from swmm.toolkit.shared_enum import SubcatchAttribute, NodeAttribute, LinkAttribute
 from scipy.optimize import differential_evolution, minimize
 from tqdm import tqdm
 from utils.swmmutils import get_node_timeseries
-
+from utils.standardization import _standardize_pkl_data
+from utils import perfutils as pf
 
 
 from utils.functions import sync_timeseries, invert_dict, load_dict
 from utils.networkutils import get_upstream_nodes, get_downstream_nodes
 from utils.swmmutils import get_model_path, run_swmm, dataframe_to_dat, get_predictions_at_nodes
-from utils.calibconstraints import CalParam, get_cal_params, get_calibration_order
+from utils.calparams import CalParam, get_cal_params, get_calibration_order
 
 from defs import CALIBRATION_ROUTINES, CALIBRATION_FORCINGS, ALGORITHMS
 
@@ -44,7 +51,7 @@ inp_file = Path(os.path.join(model_dir, 'conceptual_model1.inp'))
 # Comparison nodes comprised of SWMM junctions and outfalls
 from utils.optconfig import OptConfig
 
-def calibrate(opt_config: Path | str | OptConfig):
+def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     """
     Complete calibration routine for a SWMM model.
 
@@ -65,199 +72,99 @@ def calibrate(opt_config: Path | str | OptConfig):
 
     # Load calibration data
     
-    cal_forcings, cal_targets = load_calibration_data(routine=opt.cfg["routine"])
+    #cal_forcings, cal_targets = load_calibration_data(routine=opt.cfg["routine"])
+    
+    cal_targets = pd.read_pickle(opt.target_data_file)
+    cal_forcings = pd.read_pickle(opt.forcing_data_file)
 
-    model_dir = Path(opt.cfg["base_model_dir"])
+    cal_targets = _standardize_pkl_data(cal_targets)
+    cal_forcings = _standardize_pkl_data(cal_forcings)
 
-    if not opt.cfg["calibration_dir"].is_dir():
-        copytree(model_dir, str(opt.cfg["calibration_dir"]))
-
-    #copy the base directory to the calibration directory
-    if not (opt.cfg["calibration_dir"] / "runs").is_dir():
-        os.mkdir(str(opt.cfg["calibration_dir"] / "runs"))
+    model_dir = Path(opt.model_file).parent
+    model_name = Path(opt.model_file).stem
 
     #copy the base model in the calibration directory; this file will be modified inplace
-    cal_model = opt.cfg["calibration_dir"] / f"{opt.cfg['routine']}_CALIBRATION.inp"
-    if cal_model.exists():
-        os.remove(cal_model)
+    #cal_model = model_dir / f"{model_name}_CALIBRATION.inp"
+    #
+    #if cal_model.exists():
+    #    os.remove(cal_model)
 
-    shutil.copyfile(str(model_dir / opt.cfg["base_model_name"]), cal_model)
+    #shutil.copyfile(opt.model_file, cal_model)
+
+    cal_model = Model(str(opt.model_file))
+
+    #shutil.copyfile(str(model_dir / opt.cfg["base_model_name"]), cal_model)
     
-    if not (opt.cfg["calibration_dir"] / opt.cfg["base_model_name"]).exists():
-        warnings.warn(f"Base model {opt.cfg['base_model_name']} not found in {opt.cfg['calibration_dir']}, copying from {opt.cfg['base_model_dir']}")
-        shutil.copyfile(Path(opt.cfg['base_model_dir']) / opt.cfg['base_model_name'], opt.cfg["calibration_dir"] / opt.cfg['base_model_name'])
-    
-
-    cal_model = Model(cal_model)
-
     #initialize the run directory within the calibration directory
     # each run has its own timestamped directory within the 'run' folder of the calibration directory
-    run_dir = initialize_run(Path(os.path.join(opt.cfg["calibration_dir"], 'runs')), opt.cfg["routine"])
+    run_dir = initialize_run(opt.run_dir, name="placeholder")
 
     #save the calibration configuration to the run directory
-    opt.save_config(output_path=Path(os.path.join(run_dir, 'opt_config.yaml')))
+    #opt.save_config(output_path=run_dir / 'opt_config.yaml')
     
     #begin the calibration loop
     logger = initialize_logger()
 
-    detailed_score_file = Path(os.path.join(run_dir, 'detailed_scores.txt'))
+    detailed_score_file = opt.run_dir / 'detailed_scores.txt'
     if not detailed_score_file.exists():
         with open(detailed_score_file, 'a+') as f:
             f.write('datetime,iter,obj_param,node,score\n')
 
-    detailed_param_file = Path(os.path.join(run_dir, 'detailed_params.txt'))
+    detailed_param_file = opt.run_dir / 'detailed_params.txt'
     if not detailed_param_file.exists():
         with open(detailed_param_file, 'a+') as f:
             f.write('datetime,iter,name,init_val,cal_val\n')
         
-    logger.info("Calibration started for routine: {routine}")
+    logger.info(f"Calibration started for model: {opt.model_file.stem}")
 
-    if opt.cfg["calibration_nodes"] == []:
-        comparison_nodes_swmm = cal_model.inp.junctions.index.to_list()  # + model.inp.outfalls.index.to_list()
-    else:
-        comparison_nodes_swmm = opt.cfg["calibration_nodes"]
 
-    cal_params = get_cal_params(opt.cfg["routine"], cal_model)
+
+
+
+    #if opt.cfg["calibration_nodes"] == []:
+    #    comparison_nodes_swmm = cal_model.inp.junctions.index.to_list()  # + model.inp.outfalls.index.to_list()
+    #else:
+    #    comparison_nodes_swmm = opt.cfg["calibration_nodes"]
+
+
     params = {'param':'value'}
     iterations = {'element':'node, score, n_fun_evals, duration'}
 
-    # check that the config target variables are in the loaded calibration targets
-    target_keys = set(cal_targets.keys())
-    config_keys = set(opt.cfg["target_variables"].keys())
-    if not config_keys.issubset(target_keys):
-        raise ValueError(f"Calibration targets {cal_targets.keys()} not in {opt.cfg['target_variables'].keys()}")
-    
-    # select only the targets listed in the config file
-    if opt.cfg["target_variables"] != {}:
-        cal_targets = {key:cal_targets[key] for key in cal_targets if key in list(opt.cfg["target_variables"].keys())}
 
-    logger.info("Calibration data loaded, forcings are {cal_forcings.keys()} and targets are {cal_targets.keys()}")
-    logger.info("Starting calibration loop...")
-    
     # overwrite rainfall file with calibration forcings
-    filename = Path(os.path.join(get_model_path(cal_model, as_str=False).resolve().parent , 'precip.dat'))
-    dataframe_to_dat(filename,cal_forcings["precip"])
+    #filename = Path(os.path.join(get_model_path(cal_model, as_str=False).resolve().parent , 'precip.dat'))
+    #dataframe_to_dat(filename,cal_forcings["precip"])
     
     # set simulation datetimes
-    if opt.cfg["start_date"] == 'None':
-        dti = get_shared_datetimeindex(cal_forcings|cal_targets)
-        start_time, end_time = dti[0], dti[-1]
-        msg = f"start_date and end_date not found in config, using the datetime index of the calibration data, using {start_time} to {end_time}."
-    else:
-        start_time = datetime.strptime(opt.cfg["start_date"], "%Y-%m-%d %H:%M:%S")
-        end_time = datetime.strptime(opt.cfg["end_date"], "%Y-%m-%d %H:%M:%S")
+    #if opt.cfg["start_date"] == 'None':
+    #    dti = get_shared_datetimeindex(cal_forcings|cal_targets)
+    #    start_time, end_time = dti[0], dti[-1]
+    #    msg = f"start_date and end_date not found in config, using the datetime index of the calibration data, using {start_time} to {end_time}."
+    #else:
+    #start_time = datetime.strptime(opt.cfg["start_date"], "%Y-%m-%d %H:%M:%S")
+    #end_time = datetime.strptime(opt.cfg["end_date"], "%Y-%m-%d %H:%M:%S")
 
-    logger.info(f"start_date and end_date found in config, using {start_time} to {end_time}.")
+    #logger.info(f"start_date and end_date found in config, using {start_time} to {end_time}.")
 
-    set_simulation_datetime(
-        model=cal_model, 
-        start_time=start_time, 
-        end_time=end_time
-    ).inp.save()
+    #set_simulation_datetime(
+    #    model=cal_model, 
+    #    start_time=start_time, 
+    #    end_time=end_time
+    #).inp.save()
 
-    
     counter = OptCount()
     
-    if opt.cfg["hierarchial"]:
+    cal_model, results = de_calibration(
+        cal_forcings=cal_forcings,
+        cal_targets=cal_targets,
+        in_model=cal_model,
+        cal_params=cal_params,
+        run_dir=run_dir,
+        opt_config=opt,
+        counter=counter,
+    )
 
-     
-        #df = get_calibration_order(cal_params, cal_model)
-        #df = df[(df["node"] == "node_18") | (df["node"] == "None")]
-
-        cal_params = get_calibration_order(cal_params, cal_model)
-
-        # remove nodes that aren't included among 'comparison nodes'
-        # this doesn't generalize super well, as there may be cases you'd still want to calibrate a node that isn't in the comparison nodes
-        # however in our case, this only includes the dummy-outfalls, since we have obs everywhere
-        cal_params = [c for c in cal_params if c.node in comparison_nodes_swmm]
-
-
-        # concatenate level 0 elements (those that are not associated with a specific node)
-        # this will result in a calibration pass prior, and after, the node-specific calibration
-        #levels = np.concatenate([levels,[0]])
-
-        # sort the calibration parameters by level
-        levels = [c.level for c in cal_params]
-        levels = np.unique(levels)
-        levels = np.sort(levels)
-
-        
-
-        #calibration_order = np.argsort(levels)
-        #cal_params = [cal_params[i] for i in calibration_order]
-
-        #for cal_param in cal_params:
-        for level in levels:
-            cal_param_subset = [c for c in cal_params if c.level == level]
-            node_subset = np.unique([c.node for c in cal_param_subset]).tolist()
-
-            #node_subset = [node for node in node_subset if node in opt.cfg["calibration_nodes"]]
-
-
-
-            if "all" in [c.node.lower() for c in cal_param_subset]:
-                node_subset = opt.cfg["calibration_nodes"]
-
-            if len(node_subset) == 0:
-                pass
-            else:
-                cal_model, results = de_calibration(
-                    cal_forcings=cal_forcings,
-                    cal_targets=cal_targets,
-                    in_model=cal_model,
-                    eval_nodes=node_subset, 
-                    cal_params=cal_param_subset,
-                    run_dir=run_dir,
-                    opt_config=opt.cfg,
-                    counter=counter,
-                )
-
-                cal_model.inp.save()
-            
-            """
-            #cal_params_subset = [c for c in cal_params if c.tag in df[df.level == level].element]
-            if type(cal_param) is not list:
-                cal_param = [cal_param]
-
-
-            else:
-                eval_nodes = [c.node for c in cal_param]
-            """
-
-            """
-            if np.any(df.loc[df.level == level,"node"] == "None"):
-                comparison_nodes_subset = comparison_nodes_swmm
-            else:
-                comparison_nodes_subset = df.loc[df.level == level,"node"].unique().tolist()
-
-            # remove constraints associated with nodes that are downstream of the comparison nodes
-            # since these will have a gradient of 0
-            ds_nodes = []
-            for node in comparison_nodes_subset:
-                ds_nodes = ds_nodes + get_downstream_nodes(cal_model.network, node)[1:]
-            
-            ds_nodes = np.unique(ds_nodes).tolist()
-            cal_params_subset = [c for c in cal_params if c.tag in df[[n not in ds_nodes for n in df.node]].element]
-
-            if len(cal_params_subset) == 0:
-                pass
-            """
-                
-
-
-    else:
-        cal_model, results = de_calibration(
-            cal_forcings=cal_forcings,
-            cal_targets=cal_targets,
-            in_model=cal_model,
-            eval_nodes=comparison_nodes_swmm, 
-            cal_params=cal_params, 
-            run_dir=run_dir,
-            opt_config=opt.cfg,
-            counter=counter,
-        )
-
-        cal_model.inp.save()
+    cal_model.inp.save()
 
     #path_prm = Path(os.path.join("output", 'calib_prm_' + routine + '.txt'))
     #path_res = Path(os.path.join("output", 'calib_res_' + routine + '.txt'))
@@ -364,7 +271,7 @@ def set_params(cal_vals, cal_params, model: Model) -> Model:
 
         cp = cal_params[ii]
 
-        bounds = np.array([cp.lower_bound,cp.upper_bound])
+        limits = np.array([cp.lower_limit,cp.upper_limit])
 
         if isinstance(cp.element,tuple):
             index = cp.make_multi_index(model)
@@ -388,7 +295,7 @@ def set_params(cal_vals, cal_params, model: Model) -> Model:
 
         
         # truncate values within upper and lower bounds
-        new_val = truncate_values(new_val, bounds)
+        new_val = truncate_values(new_val, limits)
 
         old_val = getattr(model.inp, cp.section).loc[idx,cp.attribute].values[0]
         getattr(model.inp, cp.section).loc[idx,cp.attribute] = new_val
@@ -399,7 +306,7 @@ def set_params(cal_vals, cal_params, model: Model) -> Model:
     return model, changes
 
 
-def truncate_values(values, bounds):
+def truncate_values(values, limits):
     """
     Truncate values to within the specified bounds.
 
@@ -412,31 +319,11 @@ def truncate_values(values, bounds):
     """
     if type(values) != np.array:
         values = np.array(values)
-    values[values < bounds[0]] = bounds[0]
-    values[values > bounds[1]] = bounds[1]
+    values[values < limits[0]] = limits[0]
+    values[values > limits[1]] = limits[1]
     return values
 
 
-def set_simulation_datetime(model: Model, start_time=None, end_time=None) -> Model:
-    """
-    Set the simulation start and end times in the model.
-
-    :param model: Model to be updated.
-    :type model: swmmio.Model object
-    :param start_time: Simulation start time.
-    :type start_time: datetime object
-    :param end_time: Simulation end time.
-    :type end_time: datetime object
-    :returns: Model with updated simulation times.
-    :rtype: swmmio.Model object
-    """
-    model.inp.options.loc['START_TIME'] = datetime.strftime(start_time, format='%H:%M:%S')
-    model.inp.options.loc['START_DATE'] = datetime.strftime(start_time, format='%m/%d/%Y')
-    model.inp.options.loc['REPORT_START_TIME'] = datetime.strftime(start_time, format='%H:%M:%S')
-    model.inp.options.loc['REPORT_START_DATE'] = datetime.strftime(start_time, format='%m/%d/%Y')
-    model.inp.options.loc['END_TIME'] = datetime.strftime(end_time, format='%H:%M:%S')
-    model.inp.options.loc['END_DATE'] = datetime.strftime(end_time, format='%m/%d/%Y')
-    return model
 
 
 def fix_model_strings(model):
@@ -494,24 +381,6 @@ def denormalise(x, scaler):
     """
     return x * scaler[1] + scaler[0]
 
-
-
-def truncate_values(values, bounds):
-    """
-    Truncate values to within the specified bounds.
-
-    :param values: Values to be truncated.
-    :type values: np.array
-    :param bounds: Lower and upper bounds.
-    :type bounds: list of floats
-    :returns: Truncated values.
-    :rtype: np.array
-    """
-    if type(values) != np.array:
-        values = np.array(values)
-    values[values < bounds[0]] = bounds[0]
-    values[values > bounds[1]] = bounds[1]
-    return values
 
 
 def set_simulation_datetime(model: Model, start_time=None, end_time=None) -> Model:
@@ -605,7 +474,6 @@ def copy_temp_file(filename:Path, tag="TEMP_FILE"):
 def de_score_fun(
         values,
         in_model,
-        cal_model,
         cal_params,
         cal_targets,
         run_dir,
@@ -646,15 +514,35 @@ def de_score_fun(
         raise ValueError("run_dir not found")
 
     # Retrieve the *base* model
-    model = Model(in_model)
 
     # update model with current parameters 
     # during the optimization algorithm:
-    model, changes = set_params(cal_vals=values, cal_params=cal_params, model=model)
+    
+    
+    # NOTE: MODIFY MODEL PARAMS HERE
+
+    #model, changes = set_params(cal_vals=values, cal_params=cal_params, model=in_model)
+    
+    
+
+    spc = SimulationPreConfig()
+    for cp, val in zip(cal_params, values):
+        if val < cp.lower_limit:
+            val = cp.lower_limit
+        if val > cp.upper_limit:
+            val = cp.upper_limit
+
+        spc.add_update_by_token(section=cp.section, obj_id=cp.element, index=cp.index, new_val=val)
+
+    
+    #cal_model_tmp = copy_temp_file(in_model)
+    #model.inp.save(str(cal_model_tmp))
+
+
 
     # fix blank timeseries bug in swmmio (converts "" to NaN when reading, 
     # but doesn't write "" to new file), when editing inflows section
-    model = fix_model_strings(model)
+    #model = fix_model_strings(model)
 
     # Save the model to a file, then read it again
     # Must save to a file because `run_swmm()` 
@@ -664,14 +552,24 @@ def de_score_fun(
     # Make the file name unique for parallel computing.
     # Add 'TEMPFILE' tag for cleanup later, if needed.
     
-    cal_model_tmp = copy_temp_file(cal_model)
-
-
+    #cal_model_tmp
     # run SWWM
-    model.inp.save(cal_model_tmp)
-    run_swmm(Model(cal_model_tmp))
+    #shutil.copyfile(cal_model, cal_model_tmp)
+    #model.inp.save(str(cal_model_tmp))
     
-    score_df, _ = eval_model(cal_model_tmp, cal_targets, eval_nodes, opt_config=opt_config)
+    #cal_model_tmp = in_model
+    
+    outputfile = "results.out"
+    with Simulation(str(in_model), outputfile=outputfile, sim_preconfig=spc) as sim:
+        sim.execute()
+
+    #Model(cal_model_tmp).inp.save()
+
+    #out = Output(str(Path(cal_model).with_suffix(".out"))).node_series('HY035', 'Depth')
+    #os.remove(str(cal_model_tmp))
+
+
+    score_df, _ = eval_model(outputfile=outputfile, cal_targets=cal_targets, opt_config=opt_config)
     # weighted sum of multi-objective scores, mean across eval nodes
     # default uniform weights
 
@@ -679,25 +577,25 @@ def de_score_fun(
     #if opt_config["score_function"].lower() == "nse":
     #    score_df = score_df.apply(lambda x: -x)
 
-    if isinstance(cal_targets, list):
-        target_weights = np.array([1 for _ in opt_config["target_variables"]])
-    elif isinstance(cal_targets, dict):
-        target_weights = np.array([opt_config["target_variables"][key] for key in opt_config["target_variables"]])
+    #if isinstance(cal_targets, list):
+    #    target_weights = np.array([1 for _ in opt_config["target_variables"]])
+    #elif isinstance(cal_targets, dict):
+    #    target_weights = np.array([opt_config["target_variables"][key] for key in opt_config["target_variables"]])
 
-    if len(cal_targets) != len(target_weights):
-        raise ValueError("target_weights must have the same length as cal_targets")
+    #if len(cal_targets) != len(target_weights):
+    #    raise ValueError("target_weights must have the same length as cal_targets")
 
     # convex combination of scores
-    target_weights = target_weights / np.sum(target_weights)
-    target_weights = target_weights.reshape(1,-1)
-    score = np.matmul(target_weights,score_df.loc[list(opt_config["target_variables"].keys()),:].to_numpy()).mean()
+    #target_weights = target_weights / np.sum(target_weights)
+    #target_weights = target_weights.reshape(1,-1)
+    #score = np.matmul(target_weights,score_df.loc[list(opt_config["target_variables"].keys()),:].to_numpy()).mean()
 
     iter = counter.get_count()
     
     detailed_param_file = Path(os.path.join(run_dir, 'detailed_params.txt'))
     detailed_score_file = Path(os.path.join(run_dir, 'detailed_scores.txt'))
 
-    if np.mod(iter,opt_config["log_every_n"]) == 0:
+    if np.mod(iter,opt_config.log_every_n) == 0:
         for node in score_df.columns:
             for tgt in score_df.index:
                 now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
@@ -705,28 +603,29 @@ def de_score_fun(
                 with open(detailed_score_file, 'a+') as f:
                     f.write(line)
 
-    if np.mod(iter,opt_config["log_every_n"]) == 0:
-        for name, row in changes.iterrows():
-            now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-            line = f"{now},{iter},{name},{row['initial_value']},{row['cal_value']}\n"
-            with open(detailed_param_file, 'a+') as f:
-                f.write(line)
+        #for name, row in changes.iterrows():
+        #    now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
+        #    line = f"{now},{iter},{name},{row['initial_value']},{row['cal_value']}\n"
+        #    with open(detailed_param_file, 'a+') as f:
+        #        f.write(line)
 
     counter.increment()
 
     # Clean up, we will not need this model any more
-    fname_root = str(cal_model_tmp).split(".")[0]
-    os.remove(cal_model_tmp)
-    os.remove(Path(fname_root + ".out"))
-    os.remove(Path(fname_root + ".rpt"))
-    return score
+
+    #fname_root = str(cal_model_tmp).split(".")[0]
+    
+    #os.remove(cal_model_tmp)
+    #os.remove(Path(fname_root + ".out"))
+    #os.remove(Path(fname_root + ".rpt"))
+    return score_df["score"].mean()
 
 
 
 
 
 
-def eval_model(cal_model_tmp, cal_targets, eval_nodes, opt_config):
+def eval_model(outputfile, cal_targets, opt_config):
     """
     Evaluate the model using the calibration targets.
 
@@ -744,78 +643,84 @@ def eval_model(cal_model_tmp, cal_targets, eval_nodes, opt_config):
     :rtype: tuple[pd.DataFrame, dict]
     """
 
-    if opt_config["score_function"].lower() == "nse":
-        score_fun = pf.nse
-    elif opt_config["score_function"].lower() == "mse":
-        score_fun = pf.mse
-    else: 
-        raise ValueError(f"Objective function {opt_config['score_function']} not recognized")
+    PERFORMANCE_FUNCTIONS = [func for func in dir(pf) if callable(getattr(pf, func)) and not func.startswith("_")]
+    if opt_config.score_function.lower() not in PERFORMANCE_FUNCTIONS:
+        raise ValueError(f"Performance function {opt_config.score_function} not recognized")
+    
+    score_fun = getattr(pf,"nse")
+    
 
-
-    score_df = pd.DataFrame(index=list(cal_targets.keys()), columns=eval_nodes)
-    timeseries_results = {"flow": {}, "depth": {}, "tss": {}}
 
     # TODO: generalize these cases
-    if "flow" in list(cal_targets.keys()):
-        obs = cal_targets["flow"].loc[:, eval_nodes]
 
-        #sim = get_predictions_at_nodes(model=Model(cal_model_tmp), nodes=eval_nodes, param="FLOW_RATE")
-        sim = get_node_timeseries(model=Model(cal_model_tmp),nodes=eval_nodes, params=["TOTAL_INFLOW"])["TOTAL_INFLOW"][eval_nodes]
-        sim = sim.resample('15min').mean()
 
-        if opt_config["normalize"]:
-            scaler = get_scaler(obs)
-            obs = normalise(obs, scaler)
-            sim = normalise(sim, scaler)
+    obs = cal_targets
+    eval_nodes = cal_targets.keys()
+    
+    station_ids = np.unique(cal_targets.columns.get_level_values(1))
+    params = np.unique(cal_targets.columns.get_level_values(0))
 
-        obs, sim = sync_timeseries(obs, sim.loc[:, eval_nodes])
-        obs = obs.iloc[opt_config["warmup_length"]:, :]
-        sim = sim.iloc[opt_config["warmup_length"]:, :]
-        score_df.loc["flow", :] = [score_fun(obs.loc[:, col], sim.loc[:, col]) for col in obs.columns]
+    scores = pd.DataFrame(index=station_ids, columns=params)
+    dfs = []
 
-        if opt_config["normalize"]:
-            obs = denormalise(obs, scaler)
-            sim = denormalise(sim, scaler)
-        timeseries_results["flow"].update({col: {"obs": obs.loc[:, col], "sim": sim.loc[:, col]} for col in obs.columns})
+    with Output(outputfile) as out:
+        for station_id in station_ids:
+            for param in params:  
+                if param in ["discharge","flow"]:
+                    res = out.node_series(station_id, shared_enum.NodeAttribute.TOTAL_INFLOW)
+                elif param in ["stage","wl"]:
+                    res = out.node_series(station_id, shared_enum.NodeAttribute.INVERT_DEPTH)
+                else:
+                    raise ValueError(f"Parameter {param} not recognized")
+                dfs.append(pd.DataFrame(index=res.keys(), data=res.values(), columns=pd.MultiIndex.from_tuples([(param, station_id)])).copy())
 
-    if "depth" in list(cal_targets.keys()):
-        obs = cal_targets["depth"].loc[:, eval_nodes]
-        sim = get_node_timeseries(model=Model(cal_model_tmp),nodes=eval_nodes, params=["INVERT_DEPTH"])["INVERT_DEPTH"][eval_nodes]
-        sim = sim.resample('15min').mean()
+    df = pd.concat(dfs, axis=1)
+    df.columns = pd.MultiIndex.from_tuples(df.columns)
+    sim = df.copy()
 
-        if opt_config["normalize"]:
-            scaler = get_scaler(obs)
-            obs = normalise(obs, scaler)
-            sim = normalise(sim, scaler)
+    
+    sim, obs = sync_timeseries(sim, obs)
+    #sim = get_predictions_at_nodes(model=Model(cal_model_tmp), nodes=eval_nodes, param="FLOW_RATE")
+    #sim = get_node_timeseries(model=Model(cal_model_tmp),nodes=eval_nodes, params=["TOTAL_INFLOW"])["TOTAL_INFLOW"][eval_nodes]
+    #sim = sim.resample('15min').mean()
 
-        obs, sim = sync_timeseries(obs, sim.loc[:, eval_nodes])
-        obs = obs.iloc[opt_config["warmup_length"]:, :]
-        sim = sim.iloc[opt_config["warmup_length"]:, :]
-        score_df.loc["depth", :] = [score_fun(obs.loc[:, col], sim.loc[:, col]) for col in obs.columns]
+    if opt_config.normalize:
+        scaler = get_scaler(obs)
+        scaler = [s.values for s in scaler]
+        obs = normalise(obs, scaler)
+        sim = normalise(sim, scaler)
 
-        if opt_config["normalize"]:
-            obs = denormalise(obs, scaler)
-            sim = denormalise(sim, scaler)
-        timeseries_results["depth"].update({col: {"obs": obs.loc[:, col], "sim": sim.loc[:, col]} for col in obs.columns})
 
+    #obs = obs.iloc[opt_config["warmup_length"]:, :]
+    #sim = sim.iloc[opt_config["warmup_length"]:, :]
+
+    score = [score_fun(obs.loc[:, col], sim.loc[:, col]) for col in obs.columns]
+
+    scores = pd.DataFrame(index=obs.columns, data=score, columns=["score"])
+
+
+    if opt_config.normalize:
+        obs = denormalise(obs, scaler)
+        sim = denormalise(sim, scaler)
+
+    
 
         #timeseries_results["hrt"].update({col: {"obs": obs.loc[:, col], "sim": sim.loc[:, col]} for col in obs.columns})
 
 
     # invert sign of NSE since opt function will always minimize
-    if opt_config["score_function"].lower() in ["nse"]:
-        score_df = score_df.apply(lambda x: -x)
+    if opt_config.score_function.lower() in ["nse"]:
+        scores = scores.apply(lambda x: -x)
 
-    return score_df, timeseries_results
+    return scores, {"obs": obs, "sim": sim}
 
 
 def de_calibration(in_model,
                    cal_forcings,
                    cal_targets,
-                   eval_nodes,
+                   run_dir,
                    cal_params, 
-                   run_dir, 
-                   opt_config={},
+                   opt_config,
                    counter=None):
     """
     Subroutine for SWMM optimization
@@ -850,22 +755,23 @@ def de_calibration(in_model,
                                      in_model=in_model, 
                                      cal_params=cal_params,
                                      cal_targets = cal_targets,
-                                     eval_nodes=eval_nodes, 
-                                     cal_model=in_model, 
                                      run_dir=run_dir,
                                      counter=counter,
                                      opt_config=opt_config)
     
-    bounds = [(cp.lower, cp.upper) for cp in cal_params]
 
-    if opt_config["algorithm"] == "differential-evolution":
-        opt_args = {key.split("diffevol_")[1]: opt_config[key] for key in opt_config if key.startswith("diffevol_")}
-        opt_results = differential_evolution(func=opt_fun, bounds=bounds)
-    elif opt_config["algorithm"] in ["Nelder-Mead","Powell","CG","BFGS","L-BFGS-B","TNC","COBYLA","SLSQP","trust-constr","dogleg","trust-ncg","trust-exact","trust-krylov"]:
-        opt_args = {key.split("minimize_")[1]: opt_config[key] for key in opt_config if key.startswith("minimize_")}
-        opt_results = minimize(method=opt_config["algorithm"],fun=opt_fun, bounds=bounds, x0=[c.initial_value + 0.9*(c.initial_value - c.lower_bound) for c in cal_params], options=opt_args)
+
+    bounds = cal_params.get_bounds()
+
+    
+    opt_args = opt_config.algorithm_options
+    if opt_config.algorithm == "differential-evolution":
+        opt_results = differential_evolution(func=opt_fun, bounds=bounds, **opt_args)
+    elif opt_config.algorithm in ["Nelder-Mead","Powell","CG","BFGS","L-BFGS-B","TNC","COBYLA","SLSQP","trust-constr","dogleg","trust-ncg","trust-exact","trust-krylov"]:
+        
+        opt_results = minimize(method=opt_config.algorithm,fun=opt_fun, bounds=bounds, x0=[c.initial_value + 0.9*(c.initial_value - c.lower_limit) for c in cal_params], options=opt_args)
     else:
-        raise NotImplementedError(f"Algorithm {opt_config['algorithm']} not implemented")
+        raise NotImplementedError(f"Algorithm {opt_config.algorithm} not implemented")
     
     model = Model(in_model)
     model, changes = set_params(cal_vals=opt_results.x, cal_params=cal_params, model=model)
@@ -876,20 +782,6 @@ def de_calibration(in_model,
     score = opt_results.fun
     param_results = {c.tag:x for c, x in zip(cal_params, opt_results.x)}
 
-    if opt_config["algorithm"] in ["differential-evolution"]:
-        results = dict()
-        results['score'] = -opt_results.fun
-        results['params'] = param_results
-        results['n_function_evals'] = opt_results['nfev']
-        results['total_time'] = time.time() - calibration_start_time
-        results['population'] = opt_results['population']
-        results['population_energies'] = opt_results['population_energies']
-        results['nit'] = opt_results['nit']
-
-
-    elif opt_config["algorithm"] in ["Nelder-Mead","Powell","CG","BFGS","L-BFGS-B","TNC","COBYLA","SLSQP","trust-constr","dogleg","trust-ncg","trust-exact","trust-krylov"]:
-        results = dict()
-
     # clean up the temporary calibration SWMM files (NOT CURRENTLY USING TEMP DIR BECAUSE SWMMIO NOT HANDLING ABSOLUTE PATHS, MEANS NEED TO COPY PRECIP, HOTSTART, ETC. ON EACH ITERATION)
     """
     for file in [Path(in_model), Path(in_model).with_suffix('.out'), Path(in_model).with_suffix('.rpt')]:
@@ -897,7 +789,7 @@ def de_calibration(in_model,
             os.remove(file)
     """
     
-    return model, results
+    return model
 
 class OptCount():
     """
