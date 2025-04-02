@@ -84,7 +84,7 @@ class CalParam():
                  upper: float = np.inf, 
                  lower_limit: float = -np.inf, 
                  upper_limit: float = np.inf, 
-                 distributed: bool=False):
+                 distributed: bool = False):
         
         """
         Initialize a parameter for SWMM calibration.
@@ -197,7 +197,7 @@ class CalParam():
         self.df.loc[tag, 'initial_value'] = np.nan
 
 
-    def distribute(self, model):
+    def distribute(self, model: swmmio.Model) -> list["CalParam"]:
         """
         Unpacks constraints for each parameter and element for fully distributed calibration.
 
@@ -223,6 +223,7 @@ class CalParam():
         else:
             index = getattr(getattr(model.inp, self.section),self.key[0]).to_list()
 
+
         for id in index:
             cp = self.copy()
             cp.element = id
@@ -237,14 +238,8 @@ class CalParam():
             tag = "{}.{}.{}".format(cp.section, cp.attribute, id_str)
             cp.tag = tag
 
-            if isinstance(id, tuple):
-                cp.initial_value = swmm_df.loc[id, cp.attribute]
-            else:
-                cp.initial_value = getattr(model.inp, cp.section).loc[id, cp.attribute]
-            
-            if cp.initial_value != np.nan:
-                cps.append(cp)
-        return cps
+            cps.append(cp)
+        return CalParams(cps)
 
     def set_relative_bounds(self, upper:float=None, lower:float=None):
         """
@@ -255,7 +250,7 @@ class CalParam():
 
         if lower is None:
             lower = self.lower
-        
+
         self.lower = self.initial_value * (1-lower)
         self.upper = self.initial_value * (1+upper)
         return self
@@ -326,8 +321,42 @@ class CalParams(list[CalParam]):
         """
         distributed = []
         for cp in self:
-            distributed.extend(cp.distribute(model))
+            if cp.distributed:
+                distributed.extend(cp.distribute(model))
+            else:
+                distributed.append(cp)
         return CalParams(distributed)
+
+
+    def get_initial_values(self, model: swmmio.Model) -> list["CalParam"]:
+        cps = []
+        for cp in self:
+            if not cp.distributed:
+                cp.initial_value = getattr(model.inp, cp.section).loc[:, cp.attribute].mean()
+            else:
+
+
+                if len(cp.key) > 1:
+                    # in the case of a multi-indexed parameter, convert a copy of the SWMM section to a multi-index
+                    index = cp.make_multi_index(model)
+                    swmm_df = getattr(model.inp, cp.section).copy()
+                    swmm_df.set_index(index, inplace=True)
+                else:
+                    index = getattr(getattr(model.inp, cp.section),cp.key[0]).to_list()
+
+
+                for id in index:
+                        
+                        if isinstance(id, tuple):
+                            cp.initial_value = swmm_df.loc[id, cp.attribute]
+                        else:
+                            cp.initial_value = getattr(model.inp, cp.section).loc[id, cp.attribute]
+                        
+            if cp.initial_value != np.nan:
+                cps.append(cp)
+
+        return CalParams(cps)
+
 
     def set_relative_bounds(self, upper: float = None, lower: float = None):
         """
@@ -338,9 +367,11 @@ class CalParams(list[CalParam]):
         :param lower: Lower bound multiplier
         :type lower: float
         """
+        cps = []
         for cp in self:
             cp.set_relative_bounds(upper=upper, lower=lower)
-
+            cps.append(cp)
+        return CalParams(cps)
 
 
 # TODO: fix this function

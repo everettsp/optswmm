@@ -443,4 +443,3 @@ def flow_depth_to_AP(depth: np.array, height: np.array, width:np.array=None, sha
         A_ret[idx] = A
         P_ret[idx] = P
         return A_ret, P_ret
-    

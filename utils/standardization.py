@@ -109,16 +109,20 @@ def _standardize_pkl_data(data:pd.DataFrame | str | Path) -> pd.DataFrame:
     """
     validate that the target data is compatible with the model
     """
+
+
     if isinstance(data, pd.DataFrame):
-        return data
+        pass
     
     if isinstance(data, (str, Path)):
         data = _standardize_file(data, exists=True, ext="pkl")
 
-    if not data.exists():
-        raise ValueError(f"File {data} does not exist")
-    
-    data = pd.read_pickle(data)
+        if not data.exists():
+            raise ValueError(f"File {data} does not exist")
+
+        data = pd.read_pickle(data)
+        
+    data.index = data.index.tz_localize(None)
 
     return data
 
@@ -139,15 +143,24 @@ def _validate_target_data(tgt:pd.DataFrame | str | Path, model:Model) -> bool:
     
     # check that all target stations are in the model
     model_nodes = model.nodes().index.tolist()
-    tgt_stations = tgt.columns.get_level_values('station').unique().to_list()
     
-    missing_stations = [station for station in tgt_stations if station not in model_nodes]
-    if missing_stations:
-        raise ValueError(f"Missing stations in model: {missing_stations}")
+    if isinstance(tgt.columns, pd.MultiIndex):
+        tgt_stations = tgt.columns.get_level_values('station').unique().to_list()
+
+
+
+    
+        missing_stations = [station for station in tgt_stations if station not in model_nodes]
+        if missing_stations:
+            raise ValueError(f"Missing stations in model: {missing_stations}")
 
     # check that the target data date range overlaps with the model date range
     tgt_start_date, tgt_end_date = tgt.index.min(), tgt.index.max()
     mdl_start_date, mdl_end_date = get_model_datetimes(model)
+    
+    # NOTE: temp fix, removing timezone specification for comparison here
+    tgt_start_date = tgt_start_date.replace(tzinfo=None)
+    tgt_end_date = tgt_end_date.replace(tzinfo=None)
 
     if tgt_end_date < mdl_start_date or tgt_start_date > mdl_end_date:
         raise ValueError(f"No overlap between target data date range ({tgt_start_date} to {tgt_end_date}) and model date range ({mdl_start_date} to {mdl_end_date})")

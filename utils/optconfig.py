@@ -6,55 +6,68 @@ from pathlib import Path
 import warnings
 from swmmio import Model
 from utils.standardization import _standardize_file, _validate_target_data
+from utils.runutils import initialize_run
+from utils.swmmutils import set_model_datetimes
+
 
 class OptConfig:
     """Class to handle the configuration file for the optimization process"""
     def __init__(
             self,
+            name:str=None,
             config_file:Path=None,
             model_file:Path=None,
             forcing_data_file:Path=None,
             target_data_file:Path=None,
-            run_dir:Path=None,
+            run_folder:Path=None,
             calibration_nodes:list[str]=None,
             target_variables:list[str]=None,
             ignore_first_n:int=0,
             normalize:bool=True,
             score_function:str="mse",
-            routine:str=None,
             algorithm:str="differential-evolution",
             parallel:bool=False,
             hierarchial:bool=False,
             log_every_n:int=10,
             algorithm_options:dict=None,
+            save_timeseries:bool=False,
+            calibration_start_date:str=None,
+            calibration_end_date:str=None,
+            validation_start_date:str=None,
+            validation_end_date:str=None,
             ):
         
         """initialize the configuration file"""
         if config_file is None:
-            if (model_file is None) or (forcing_data_file is None) or (target_data_file is None) or (run_dir is None):
-                raise ValueError("If config file not provided, 'model_file', 'forcing_data_file', 'target_data_file', and 'run_dir' must be specified")
+            if (model_file is None) or (forcing_data_file is None) or (target_data_file is None) or (run_folder is None):
+                raise ValueError("If config file not provided, 'model_file', 'forcing_data_file', 'target_data_file', and 'run_folder' must be specified")
         
+        self.name = name
         self.config_file = config_file
         self.model_file = model_file
         self.forcing_data_file = forcing_data_file
         self.target_data_file = target_data_file
-        self.run_dir = run_dir
+        self.run_folder = run_folder
+        self.run_dir = None
         self.calibration_nodes = calibration_nodes
         self.target_variables = target_variables
         self.ignore_first_n = ignore_first_n
         self.normalize = normalize
         self.score_function = score_function
-        self.routine = routine
         self.algorithm = algorithm
         self.parallel = parallel
         self.hierarchial = hierarchial
         self.log_every_n = log_every_n
         self.algorithm_options = algorithm_options
-    
+        self.save_timeseries = save_timeseries
+        self.calibration_start_date = calibration_start_date
+        self.calibration_end_date = calibration_end_date
+        self.validation_start_date = validation_start_date
+        self.validation_end_date = validation_end_date
+
         # if config file provided, load and assign, overwriting default values
         if config_file is not None:
             raise NotImplementedError("Config file not implemented")
-
             self._validate_config_file(config_file)
             self.load_config(config_file)
 
@@ -65,12 +78,31 @@ class OptConfig:
         self._validate_target_data()
         self._assign_default_opt_options()
 
+
+    def initialize_run(self):
+        if not self.run_folder.exists():
+            self.run_folder.mkdir()
+
+        self.run_dir = initialize_run(self.run_folder, self.name)
+        self.results_file_params = self.run_dir / 'results_params.txt'
+        self.results_file_scores = self.run_dir / 'results_scores.txt'
+        self.calibrated_model_file = self.run_dir / 'calibrated_model.inp'
+
+        self._initialize_model()
+
+        if not self.results_file_scores.exists():
+            with open(self.results_file_scores, 'a+') as f:
+                f.write('datetime,iter,obj_param,node,fun,score\n')
+        
+        if not self.results_file_params.exists():
+            with open(self.results_file_params, 'a+') as f:
+                f.write('datetime,iter,section,attribute,element,init_val,cal_val\n')
+            
     def load_config(self, config_file):
         """load the configuration file"""
         with open(config_file, 'r') as file:
             for key, value in yaml.safe_load(file).items():
                 setattr(self, key, value)
-
 
     def _assign_default_opt_options(self):
         if (self.algorithm == "differential-evolution") & (self.algorithm_options is None):
@@ -89,15 +121,24 @@ class OptConfig:
         _standardize_file(self.forcing_data_file, exists=True, ext=".pkl")
         _standardize_file(self.target_data_file, exists=True, ext=".pkl")
         
-        _standardize_file(self.run_dir, exists=False)
-        if not Path(self.run_dir).exists():
-            Path(self.run_dir).mkdir()
+        _standardize_file(self.run_folder, exists=False)
+        #if not Path(self.run_dir).exists():
+        #    Path(self.run_dir).mkdir()
+
+        if isinstance(self.score_function, str):
+            self.score_function = [self.score_function]
+        self.score_function = [x.lower() for x in self.score_function]
 
         if self.algorithm not in ALGORITHMS:
             raise ValueError(f"Algorithm {self.algorithm} not in {ALGORITHMS}")
         
 
-
+    def _initialize_model(self):
+        """initialize the model object"""
+        mdl = Model(str(self.model_file))
+        if self.calibration_start_date is not None:
+            mdl = set_model_datetimes(model=mdl, start_datetime=self.calibration_start_date, end_datetime=self.calibration_end_date)
+            mdl.inp.save()
 
     def _validate_target_data(self):
         """validate that the target data is compatible with the model"""

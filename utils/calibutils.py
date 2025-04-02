@@ -43,6 +43,10 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 import matplotlib.pyplot as plt
 
+# these functions get their sign flipped in the optimization routine
+MAXIMIZE_FUNCTIONS = ["nse", "kge", "rsr", "rsq", "pearsonr", "spearmanr"]
+
+
 # Load conceptual SWMM model
 model_dir = Path('dat/winnipeg1')
 inp_file = Path(os.path.join(model_dir, 'conceptual_model1.inp'))
@@ -80,6 +84,8 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     cal_targets = _standardize_pkl_data(cal_targets)
     cal_forcings = _standardize_pkl_data(cal_forcings)
 
+
+
     model_dir = Path(opt.model_file).parent
     model_name = Path(opt.model_file).stem
 
@@ -97,7 +103,7 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     
     #initialize the run directory within the calibration directory
     # each run has its own timestamped directory within the 'run' folder of the calibration directory
-    run_dir = initialize_run(opt.run_dir, name="placeholder")
+    opt_config.initialize_run()
 
     #save the calibration configuration to the run directory
     #opt.save_config(output_path=run_dir / 'opt_config.yaml')
@@ -105,20 +111,8 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     #begin the calibration loop
     logger = initialize_logger()
 
-    detailed_score_file = opt.run_dir / 'detailed_scores.txt'
-    if not detailed_score_file.exists():
-        with open(detailed_score_file, 'a+') as f:
-            f.write('datetime,iter,obj_param,node,score\n')
 
-    detailed_param_file = opt.run_dir / 'detailed_params.txt'
-    if not detailed_param_file.exists():
-        with open(detailed_param_file, 'a+') as f:
-            f.write('datetime,iter,name,init_val,cal_val\n')
-        
     logger.info(f"Calibration started for model: {opt.model_file.stem}")
-
-
-
 
 
     #if opt.cfg["calibration_nodes"] == []:
@@ -154,17 +148,16 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
 
     counter = OptCount()
     
-    cal_model, results = de_calibration(
+    success = de_calibration(
         cal_forcings=cal_forcings,
         cal_targets=cal_targets,
         in_model=cal_model,
         cal_params=cal_params,
-        run_dir=run_dir,
         opt_config=opt,
         counter=counter,
     )
 
-    cal_model.inp.save()
+    #cal_model.inp.save()
 
     #path_prm = Path(os.path.join("output", 'calib_prm_' + routine + '.txt'))
     #path_res = Path(os.path.join("output", 'calib_res_' + routine + '.txt'))
@@ -181,12 +174,12 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
 
 
     """reload and run the calibrated model"""
-    model = Model(get_model_path(cal_model))
-    run_swmm(model)
-    model.inp.save()
+    #model = Model(get_model_path(cal_model))
+    #run_swmm(model)
+    #model.inp.save()
 
     """save a copy to the run directory (for archiving purposes)"""
-    model.inp.save(str(run_dir / "calibrated_model.inp"))
+    #model.inp.save(str(opt.run_dir / "calibrated_model.inp"))
 
     """evaluate the calibrated model"""
 
@@ -232,23 +225,7 @@ def initialize_logger():
     return logger
 
 
-def initialize_run(run_loc: Path, name: str):
-    """
-    Creates a timestamped run directory to track calibration results.
 
-    :param run_loc: Path to the directory where the run directory will be created.
-    :type run_loc: Path
-    :param name: Name of the calibration routine.
-    :type name: str
-    :returns: Path to the created run directory.
-    :rtype: Path
-    """
-    now = datetime.now()
-    current_time = now.strftime("%d-%m-%y-%H%M%S")
-    run_dir = "run-{}_{}".format(name, current_time)
-    x = Path(os.path.join(run_loc, run_dir))
-    os.mkdir(x)
-    return x
 
 
 def set_params(cal_vals, cal_params, model: Model) -> Model:
@@ -476,7 +453,6 @@ def de_score_fun(
         in_model,
         cal_params,
         cal_targets,
-        run_dir,
         eval_nodes:list[str]=None,
         counter=0,
         opt_config=None):
@@ -493,8 +469,7 @@ def de_score_fun(
     :type constraints: Constraints object
     :param cal_targets: Calibration targets.
     :type cal_targets: dict
-    :param run_dir: Path to the run directory.
-    :type run_dir: Path object
+
     :param warmup_len: Number of warmup timesteps, defaults to 48.
     :type warmup_len: int, optional
     :param eval_nodes: Nodes to evaluate.
@@ -510,8 +485,6 @@ def de_score_fun(
     """
     # print("DEBUGa")
     
-    if run_dir is None:
-        raise ValueError("run_dir not found")
 
     # Retrieve the *base* model
 
@@ -532,11 +505,29 @@ def de_score_fun(
         if val > cp.upper_limit:
             val = cp.upper_limit
 
-        spc.add_update_by_token(section=cp.section, obj_id=cp.element, index=cp.index, new_val=val)
 
-    
-    #cal_model_tmp = copy_temp_file(in_model)
-    #model.inp.save(str(cal_model_tmp))
+    # if it's not a distributed parameter, get all element ids and apply the new value everywhere
+        if not cp.distributed:
+            with Simulation(in_model) as sim:
+
+                match cp.section:
+                    case "subcatchments" | "infiltration":
+                        element_ids = [s.subcatchmentid for s in Subcatchments(sim)]
+                    case "conduits":
+                        element_ids = [l.linkid for l in Links(sim)]
+                    case "nodes":
+                        element_ids = [n.nodeid for n in Nodes(sim)]
+                    case _:
+                        raise ValueError(f"Section {cp.section} not recognized")
+                for element_id in element_ids:
+                    spc.add_update_by_token(section=cp.section, obj_id=element_id, index=cp.index, new_val=val)
+
+        else:
+            spc.add_update_by_token(section=cp.section, obj_id=cp.element, index=cp.index, new_val=val)
+
+        
+        #cal_model_tmp = copy_temp_file(in_model)
+        #model.inp.save(str(cal_model_tmp))
 
 
 
@@ -569,7 +560,7 @@ def de_score_fun(
     #os.remove(str(cal_model_tmp))
 
 
-    score_df, _ = eval_model(outputfile=outputfile, cal_targets=cal_targets, opt_config=opt_config)
+    score_df, timeseries_results = eval_model(outputfile=outputfile, cal_targets=cal_targets, opt_config=opt_config)
     # weighted sum of multi-objective scores, mean across eval nodes
     # default uniform weights
 
@@ -591,23 +582,38 @@ def de_score_fun(
     #score = np.matmul(target_weights,score_df.loc[list(opt_config["target_variables"].keys()),:].to_numpy()).mean()
 
     iter = counter.get_count()
-    
-    detailed_param_file = Path(os.path.join(run_dir, 'detailed_params.txt'))
-    detailed_score_file = Path(os.path.join(run_dir, 'detailed_scores.txt'))
+
+
+    # make a copy of the score df for writing to the results file
+    score_df_copy = score_df.copy()
+    # if NSE, flip the sign back (we flipped it in eval_model since we can only minimize)
+    for col in score_df_copy.columns:
+        if col in MAXIMIZE_FUNCTIONS:
+            score_df_copy[col] = score_df_copy[col].apply(lambda x: -x)
+
 
     if np.mod(iter,opt_config.log_every_n) == 0:
-        for node in score_df.columns:
-            for tgt in score_df.index:
+        for node in score_df_copy.columns:
+            for tgt in score_df_copy.index:
                 now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-                line = f"{now},{iter},{tgt},{node},{score_df.loc[tgt, node]}\n"
-                with open(detailed_score_file, 'a+') as f:
+                line = f"{now},{iter},{tgt},{node},{score_df_copy.loc[tgt, node]}\n"
+                with open(opt_config.results_file_scores, 'a+') as f:
                     f.write(line)
 
-        #for name, row in changes.iterrows():
-        #    now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-        #    line = f"{now},{iter},{name},{row['initial_value']},{row['cal_value']}\n"
-        #    with open(detailed_param_file, 'a+') as f:
-        #        f.write(line)
+        
+        for cp, val in zip(cal_params, values):
+            now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
+            line = f"{now},{iter},{cp.section},{cp.attribute},{cp.element},{cp.initial_value},{val}\n"
+            with open(opt_config.results_file_params, 'a+') as f:
+                f.write(line)
+
+        if opt_config.save_timeseries:
+            if not (opt_config.run_dir / "timeseries").exists():
+                os.mkdir(opt_config.run_dir / "timeseries")
+
+            for ts in timeseries_results.keys():
+                filename = opt_config.run_dir / "timeseries" / f"{ts}_{iter}.pkl"
+                timeseries_results[ts].to_pickle(filename)
 
     counter.increment()
 
@@ -618,7 +624,7 @@ def de_score_fun(
     #os.remove(cal_model_tmp)
     #os.remove(Path(fname_root + ".out"))
     #os.remove(Path(fname_root + ".rpt"))
-    return score_df["score"].mean()
+    return score_df[opt_config.score_function].mean()
 
 
 
@@ -644,21 +650,30 @@ def eval_model(outputfile, cal_targets, opt_config):
     """
 
     PERFORMANCE_FUNCTIONS = [func for func in dir(pf) if callable(getattr(pf, func)) and not func.startswith("_")]
-    if opt_config.score_function.lower() not in PERFORMANCE_FUNCTIONS:
-        raise ValueError(f"Performance function {opt_config.score_function} not recognized")
+    missing_funcs = [func for func in opt_config.score_function if func not in PERFORMANCE_FUNCTIONS]
+    if len(missing_funcs) > 0:
+        raise ValueError(f"Performance function {missing_funcs} not recognized")
     
-    score_fun = getattr(pf,"nse")
-    
 
+    if len(opt_config.score_function) > 1:
+        raise NotImplementedError("Multiple performance functions not implemented")
+    else:
+        score_function = opt_config.score_function[0]
+        # TODO: add support for multiple performance functions
+    score_fun = getattr(pf,score_function)
 
-    # TODO: generalize these cases
-
-
-    obs = cal_targets
-    eval_nodes = cal_targets.keys()
     
     station_ids = np.unique(cal_targets.columns.get_level_values(1))
     params = np.unique(cal_targets.columns.get_level_values(0))
+
+    
+    params = [p for p in params if p in opt_config.target_variables]
+    if len(params) == 0:
+        raise ValueError(f"No parameters to evaluate; target_variables: {opt_config.target_variables}, target_data: {cal_targets.columns.get_level_values(0)}")
+
+    obs = cal_targets.loc[:, params]
+    
+
 
     scores = pd.DataFrame(index=station_ids, columns=params)
     dfs = []
@@ -666,9 +681,9 @@ def eval_model(outputfile, cal_targets, opt_config):
     with Output(outputfile) as out:
         for station_id in station_ids:
             for param in params:  
-                if param in ["discharge","flow"]:
+                if param in ["discharge(cms)","flow(cms)"]:
                     res = out.node_series(station_id, shared_enum.NodeAttribute.TOTAL_INFLOW)
-                elif param in ["stage","wl"]:
+                elif param in ["stage(m)","wl(m)"]:
                     res = out.node_series(station_id, shared_enum.NodeAttribute.INVERT_DEPTH)
                 else:
                     raise ValueError(f"Parameter {param} not recognized")
@@ -690,13 +705,12 @@ def eval_model(outputfile, cal_targets, opt_config):
         obs = normalise(obs, scaler)
         sim = normalise(sim, scaler)
 
-
     #obs = obs.iloc[opt_config["warmup_length"]:, :]
     #sim = sim.iloc[opt_config["warmup_length"]:, :]
 
     score = [score_fun(obs.loc[:, col], sim.loc[:, col]) for col in obs.columns]
 
-    scores = pd.DataFrame(index=obs.columns, data=score, columns=["score"])
+    scores = pd.DataFrame(index=obs.columns, data=score, columns=[score_function])
 
 
     if opt_config.normalize:
@@ -709,7 +723,7 @@ def eval_model(outputfile, cal_targets, opt_config):
 
 
     # invert sign of NSE since opt function will always minimize
-    if opt_config.score_function.lower() in ["nse"]:
+    if score_function in MAXIMIZE_FUNCTIONS:
         scores = scores.apply(lambda x: -x)
 
     return scores, {"obs": obs, "sim": sim}
@@ -718,7 +732,6 @@ def eval_model(outputfile, cal_targets, opt_config):
 def de_calibration(in_model,
                    cal_forcings,
                    cal_targets,
-                   run_dir,
                    cal_params, 
                    opt_config,
                    counter=None):
@@ -734,8 +747,6 @@ def de_calibration(in_model,
             calibration targets
         constraints: Constraints object
             parameter constraints
-        run_dir: Path object
-            path to the run directory
         opt_config: dict
             optimization configuration
     
@@ -755,7 +766,6 @@ def de_calibration(in_model,
                                      in_model=in_model, 
                                      cal_params=cal_params,
                                      cal_targets = cal_targets,
-                                     run_dir=run_dir,
                                      counter=counter,
                                      opt_config=opt_config)
     
@@ -773,14 +783,14 @@ def de_calibration(in_model,
     else:
         raise NotImplementedError(f"Algorithm {opt_config.algorithm} not implemented")
     
-    model = Model(in_model)
-    model, changes = set_params(cal_vals=opt_results.x, cal_params=cal_params, model=model)
+    #model = Model(in_model)
+    #model, changes = set_params(cal_vals=opt_results.x, cal_params=cal_params, model=model)
 
-    model = fix_model_strings(model)
-    model.inp.save()
+    #model = fix_model_strings(model)
+    #model.inp.save()
 
-    score = opt_results.fun
-    param_results = {c.tag:x for c, x in zip(cal_params, opt_results.x)}
+    #score = opt_results.fun
+    #param_results = {c.tag:x for c, x in zip(cal_params, opt_results.x)}
 
     # clean up the temporary calibration SWMM files (NOT CURRENTLY USING TEMP DIR BECAUSE SWMMIO NOT HANDLING ABSOLUTE PATHS, MEANS NEED TO COPY PRECIP, HOTSTART, ETC. ON EACH ITERATION)
     """
@@ -789,7 +799,7 @@ def de_calibration(in_model,
             os.remove(file)
     """
     
-    return model
+    return True
 
 class OptCount():
     """
@@ -967,49 +977,6 @@ class calibration_data():
     
     """
 
-
-def load_calibration_data(routine: str, data_dir="dat/calibration-data") -> dict[str: pd.DataFrame]:
-    """
-    Load the pre-processed calibration data (forcing and observed).
-
-    :param routine: One of ["dry", "wet", "tss"].
-    :type routine: str
-    :param data_dir: Directory containing the calibration data.
-    :type data_dir: str
-    :returns: Dictionary containing the calibration forcings and dictionary containing the calibration targets.
-    :rtype: dict[str: pd.DataFrame]
-    """
-    cal_forcings = {}
-    cal_targets = {}
-    if routine in ["dry"]:
-        cal_targets["flow"] = pd.read_csv(os.path.join(data_dir, "dry-weather_flow.csv"), index_col=0, parse_dates=True)
-        cal_targets["depth"] = pd.read_csv(os.path.join(data_dir, "dry-weather_depth.csv"), index_col=0, parse_dates=True)
-
-        # create a dummy rainfall dataframe for dry-weather calibration
-        one_week = np.arange(datetime(year=2001, month=1, day=1, hour=0, minute=0, second=0), 
-                            datetime(year=2001, month=1, day=8, hour=0, minute=0, second=0), 
-                            timedelta(minutes=15)).astype(datetime)
-        
-        dwf_rainfall = pd.DataFrame(index=one_week, columns=['rg1'])
-        dwf_rainfall['rg1'] = 0
-        cal_forcings["precip"] = dwf_rainfall
-
-    elif routine in ["wet","tss"]:
-        cal_targets["flow"] = pd.read_csv(os.path.join(data_dir, "wet-weather_flow.csv"), index_col=0, parse_dates=True)
-        cal_targets["depth"] = pd.read_csv(os.path.join(data_dir, "wet-weather_depth.csv"), index_col=0, parse_dates=True)
-        cal_targets["vol"] = pd.read_csv(os.path.join(data_dir, "wet-weather_vol.csv"), index_col=0, parse_dates=True)
-        cal_targets["hrt"] = pd.read_csv(os.path.join(data_dir, "wet-weather_hrt.csv"), index_col=0)
-        cal_targets["hrt"] = cal_targets["hrt"][cal_targets["hrt"].columns[0]] # convert from pd.df to pd.series
-        
-        cal_forcings["precip"] = pd.read_pickle(os.path.join(data_dir, "precip.pkl"))
-
-        cal_targets["tss"] = preprocess_tss_data(data_dir=Path("data"))
-        
-    else:
-        raise NotImplementedError(f"Routine {routine} is not implemented, choices include: {CALIBRATION_ROUTINES}")
-    return cal_forcings, cal_targets
-
-
 def get_shared_datetimeindex(x: dict[str: pd.DataFrame]) -> pd.DatetimeIndex:
     """
     Get the common datetimeindex of a dictionary of dataframes. Ignores dataframes with non-datetimeindex.
@@ -1022,38 +989,5 @@ def get_shared_datetimeindex(x: dict[str: pd.DataFrame]) -> pd.DatetimeIndex:
     dti = pd.concat([x[key] for key in x if type(x[key].index) == pd.DatetimeIndex], axis=1).dropna(axis=1, how="all").dropna(axis=0, how="any").index
 
     return dti
-
-
-
-
-def summarize_runs(runs_dir:Path) -> list[Path]:
-    run_dirs = [dir for dir in runs_dir.iterdir() if dir.is_dir()]
-    run_dates = [datetime.strptime(d.name.split("_")[1], "%d-%m-%y-%H%M%S") for d in run_dirs]
-    df = pd.DataFrame(index=run_dirs, data=run_dates, columns=["dates"])
-
-
-    for d in run_dirs:
-        cfg = load_dict(d / "opt_config.yaml")
-        for k, v in cfg.items():
-            if v == []:
-                v = ''
-            if isinstance(v, list):
-                v = ', '.join(v)
-            if isinstance(v, dict):
-                v = ', '.join([f"{k1}: {v1}" for k1, v1 in v.items()])
-            df.loc[d, k] = v
-
-        if (not (d/"detailed_scores.txt").exists()) | (not (d/"detailed_params.txt").exists()):
-            df.loc[d, "status"] = "failed"
-        elif(len(pd.read_csv(d / "detailed_scores.txt")) == 0) | (len(pd.read_csv(d / "detailed_params.txt")) == 0):
-            df.loc[d, "status"] = "failed"
-        elif not (d/"calibrated_model.inp").exists():
-            df.loc[d, "status"] = "incomplete"
-        else:
-            df.loc[d, "status"] = "complete"
-
-        df = df.sort_values(by="dates")
-    return df
-
 
 
