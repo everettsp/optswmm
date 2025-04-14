@@ -31,7 +31,7 @@ def summarize_runs(runs_dir:Path) -> list[Path]:
     df = pd.DataFrame(index=run_dirs, data=run_dates, columns=["dates"])
 
     for d in run_dirs:
-        cfg = load_dict(d / "opt_config.yaml")
+        cfg = load_dict(d / "config.yml")
         for k, v in cfg.items():
             if v == []:
                 v = ''

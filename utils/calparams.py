@@ -55,10 +55,14 @@ PARAM_INDICES = {
         "Shape":1,
         "Geom1":2,
         "Geom2":3,
+    },
+    "inflows":{
+        "Mfactor":4,
+        "Sfactor":5,
+        "Baseline":6,
+        "Pattern":7,
     }
 }
-
-
 
 
 #DEFAULT_CHANGES = ['relative', 'absolute']
@@ -74,8 +78,6 @@ def tuple_to_str(tup: tuple) -> str:
     """
     return '_'.join([str(x) for x in tup])
 
-
-
 class CalParam():
     def __init__(self, 
                  section: str, 
@@ -84,7 +86,9 @@ class CalParam():
                  upper: float = np.inf, 
                  lower_limit: float = -np.inf, 
                  upper_limit: float = np.inf, 
-                 distributed: bool = False):
+                 distributed: bool = False,
+                 relative: bool = False,
+                 ):
         
         """
         Initialize a parameter for SWMM calibration.
@@ -118,7 +122,8 @@ class CalParam():
         self.lower_limit = lower_limit
         self.upper_limit = upper_limit
         self.distributed = distributed
-        
+        self.relative = relative
+
         self.initial_value = None
         self.index = None
         self.row_num = None
@@ -134,6 +139,16 @@ class CalParam():
         """
         return deepcopy(self)
 
+    def truncate(self, val):
+        """
+        Truncates the search bounds for distributed parameters.
+        """
+        if self.lower_limit > val:
+            val = self.lower_limit
+        if self.upper_limit < val:
+            val = self.upper_limit
+        return val
+    
     def _standardize(self):
         """
         Standardizes the constraints.
@@ -241,18 +256,27 @@ class CalParam():
             cps.append(cp)
         return CalParams(cps)
 
-    def set_relative_bounds(self, upper:float=None, lower:float=None):
+    def relative_bounds_to_absolute(self, upper:float=None, lower:float=None):
         """
-        Sets the relative bounds for the parameters.
+        If not relative param changes, convert the upper and lower bounds
+        from relative to absolute, using the initial values of each parameter
         """
-        if upper is None:
-            upper = self.upper
+        if not self.relative:
+            if upper is None:
+                upper = self.upper
 
-        if lower is None:
-            lower = self.lower
+            if lower is None:
+                lower = self.lower
 
-        self.lower = self.initial_value * (1-lower)
-        self.upper = self.initial_value * (1+upper)
+            self.lower = self.initial_value * (1+lower)
+            self.upper = self.initial_value * (1+upper)
+
+            # truncate the search bounds for distributed parameters
+            if self.lower < self.lower_limit:
+                self.lower = self.lower_limit
+            if self.upper > self.upper_limit:
+                self.upper = self.upper_limit
+
         return self
 
 
@@ -277,17 +301,21 @@ class CalParams(list[CalParam]):
 
     def get_bounds(self):
         bounds = []
-        for cp in self:
-            if cp.lower < cp.lower_limit:
-                lower = cp.lower_limit
-            else:
-                lower = cp.lower
-            if cp.upper > cp.upper_limit:
-                upper = cp.upper_limit
-            else:
-                upper = cp.upper
 
-            bounds.append((lower, upper))
+        for cp in self:
+            
+            # NOTE: temporarily commented out the truncation of the bounds, this is done later instead
+
+            #if cp.lower < cp.lower_limit:
+            #    lower = cp.lower_limit
+            #else:
+            #    lower = cp.lower
+            #if cp.upper > cp.upper_limit:
+            #    upper = cp.upper_limit
+            #else:
+            #    upper = cp.upper
+
+            bounds.append((cp.lower, cp.upper))
         return bounds
 
     def filter_by_section(self, section: str) -> "CalParams":
@@ -330,35 +358,34 @@ class CalParams(list[CalParam]):
 
     def get_initial_values(self, model: swmmio.Model) -> list["CalParam"]:
         cps = []
+
         for cp in self:
-            if not cp.distributed:
-                cp.initial_value = getattr(model.inp, cp.section).loc[:, cp.attribute].mean()
+            
+            if not cp.distributed:                
+                if cp.relative:
+                    cp.initial_value = 0.5
+                else:
+                    cp.initial_value = getattr(model.inp, cp.section).loc[:, cp.attribute].mean()
+
             else:
-
-
                 if len(cp.key) > 1:
                     # in the case of a multi-indexed parameter, convert a copy of the SWMM section to a multi-index
                     index = cp.make_multi_index(model)
                     swmm_df = getattr(model.inp, cp.section).copy()
                     swmm_df.set_index(index, inplace=True)
+                    cp.initial_value = swmm_df.loc[cp.element, cp.attribute]
+
                 else:
                     index = getattr(getattr(model.inp, cp.section),cp.key[0]).to_list()
+                    cp.initial_value = getattr(model.inp, cp.section).loc[cp.element, cp.attribute]
 
-
-                for id in index:
-                        
-                        if isinstance(id, tuple):
-                            cp.initial_value = swmm_df.loc[id, cp.attribute]
-                        else:
-                            cp.initial_value = getattr(model.inp, cp.section).loc[id, cp.attribute]
-                        
             if cp.initial_value != np.nan:
                 cps.append(cp)
 
         return CalParams(cps)
 
 
-    def set_relative_bounds(self, upper: float = None, lower: float = None):
+    def relative_bounds_to_absolute(self, upper: float = None, lower: float = None):
         """
         Set relative bounds for all CalParams in the list.
 
@@ -369,7 +396,8 @@ class CalParams(list[CalParam]):
         """
         cps = []
         for cp in self:
-            cp.set_relative_bounds(upper=upper, lower=lower)
+            if not cp.relative:
+                cp.relative_bounds_to_absolute(upper=upper, lower=lower)
             cps.append(cp)
         return CalParams(cps)
 

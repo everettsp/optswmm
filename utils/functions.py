@@ -28,14 +28,14 @@ def save_dict(filename: Path, d: dict):
     if type(filename) == str:
         filename = Path(filename)
         
-    if filename.suffix == '.yaml':
+    if filename.suffix in ['.yml','.yaml']:
         with open(filename, 'w') as file:
             yaml.dump(d, file)
     elif filename.suffix == '.json':
         with open(filename, 'w+') as fp:
             json.dump(d, fp)
     else:
-        raise NotImplementedError('only .yaml and .json files are supported')
+        raise NotImplementedError('only .yml, .yaml, and .json files are supported')
 
 def load_dict(filename: Path) -> dict:
     """
@@ -50,7 +50,7 @@ def load_dict(filename: Path) -> dict:
     if type(filename) == str:
         filename = Path(filename)
 
-    if filename.suffix == '.yaml':
+    if filename.suffix in ['.yml','.yaml']:
         with open(filename, 'r') as file:
             d = yaml.safe_load(file)
     elif filename.suffix == '.json':
@@ -58,7 +58,7 @@ def load_dict(filename: Path) -> dict:
         with open(filename, 'r') as fp:
             d = json.load(fp)
     else:
-        raise NotImplementedError('only .yaml and .json files are supported')
+        raise NotImplementedError('only .yml, .yaml and .json files are supported')
     return d
 
 def check_same_columns(df1: pd.DataFrame, df2: pd.DataFrame):
@@ -89,6 +89,12 @@ def sync_timeseries(ts1: pd.DataFrame, ts2: pd.DataFrame) -> pd.DataFrame:
     :raises ValueError: If no mutual datetimes are found between the two timeseries.
     """
     check_same_columns(ts1, ts2)
+
+    # round to nearest minute, since sometimes SWMM results are off by 1 second
+    # TODO: figure out why SWMM results are sometimes off by 1 second. The options all seem to be fine.
+    
+    ts1.index = ts1.index.round('T')
+    ts2.index = ts2.index.round('T')
     mutual_datetimes = pd.merge(right=ts1, left=ts2, right_index=True, left_index=True).index
 
     if len(mutual_datetimes) == 0:

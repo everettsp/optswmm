@@ -147,23 +147,23 @@ def _validate_target_data(tgt:pd.DataFrame | str | Path, model:Model) -> bool:
     if isinstance(tgt.columns, pd.MultiIndex):
         tgt_stations = tgt.columns.get_level_values('station').unique().to_list()
 
-
-
-    
         missing_stations = [station for station in tgt_stations if station not in model_nodes]
         if missing_stations:
             raise ValueError(f"Missing stations in model: {missing_stations}")
 
+    if len(tgt) < 1000:
+        raise ValueError(f"Target data '{tgt.columns}' must have at least 1000 timesteps")
+
     # check that the target data date range overlaps with the model date range
-    tgt_start_date, tgt_end_date = tgt.index.min(), tgt.index.max()
-    mdl_start_date, mdl_end_date = get_model_datetimes(model)
+    #tgt_start_date, tgt_end_date = tgt.index.min(), tgt.index.max()
+    #mdl_start_date, mdl_end_date = get_model_datetimes(model)
     
     # NOTE: temp fix, removing timezone specification for comparison here
-    tgt_start_date = tgt_start_date.replace(tzinfo=None)
-    tgt_end_date = tgt_end_date.replace(tzinfo=None)
+    #tgt_start_date = tgt_start_date.replace(tzinfo=None)
+    #tgt_end_date = tgt_end_date.replace(tzinfo=None)
 
-    if tgt_end_date < mdl_start_date or tgt_start_date > mdl_end_date:
-        raise ValueError(f"No overlap between target data date range ({tgt_start_date} to {tgt_end_date}) and model date range ({mdl_start_date} to {mdl_end_date})")
+    #if tgt_end_date < mdl_start_date or tgt_start_date > mdl_end_date:
+    #    raise ValueError(f"No overlap between target data date range ({tgt_start_date} to {tgt_end_date}) and model date range ({mdl_start_date} to {mdl_end_date})")
     
     return True
 

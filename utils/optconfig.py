@@ -4,7 +4,12 @@ import yaml
 from defs import ALGORITHMS, CALIBRATION_ROUTINES, CONFIG_OPTIONS
 from pathlib import Path
 import warnings
+import pandas as pd
+import numpy as np
+
 from swmmio import Model
+
+
 from utils.standardization import _standardize_file, _validate_target_data
 from utils.runutils import initialize_run
 from utils.swmmutils import set_model_datetimes
@@ -67,19 +72,23 @@ class OptConfig:
 
         # if config file provided, load and assign, overwriting default values
         if config_file is not None:
-            raise NotImplementedError("Config file not implemented")
-            self._validate_config_file(config_file)
+            #raise NotImplementedError("Config file not implemented")
+            #self._validate_config_file(config_file)
             self.load_config(config_file)
 
-        #self._standardize_config()
 
+
+    def _initialize_run(self):
+
+                #self._standardize_config()
+        self._initialize_model()
         self._standardize_config()
         self.model = Model(str(self.model_file))
         self._validate_target_data()
         self._assign_default_opt_options()
 
 
-    def initialize_run(self):
+
         if not self.run_folder.exists():
             self.run_folder.mkdir()
 
@@ -88,7 +97,6 @@ class OptConfig:
         self.results_file_scores = self.run_dir / 'results_scores.txt'
         self.calibrated_model_file = self.run_dir / 'calibrated_model.inp'
 
-        self._initialize_model()
 
         if not self.results_file_scores.exists():
             with open(self.results_file_scores, 'a+') as f:
@@ -103,6 +111,8 @@ class OptConfig:
         with open(config_file, 'r') as file:
             for key, value in yaml.safe_load(file).items():
                 setattr(self, key, value)
+        self._standardize_config()    
+            
 
     def _assign_default_opt_options(self):
         if (self.algorithm == "differential-evolution") & (self.algorithm_options is None):
@@ -125,6 +135,21 @@ class OptConfig:
         #if not Path(self.run_dir).exists():
         #    Path(self.run_dir).mkdir()
 
+        # Ensure datetime fields are in datetime format
+        datetime_fields = [
+            "calibration_start_date",
+            "calibration_end_date",
+            "validation_start_date",
+            "validation_end_date",
+        ]
+        for field in datetime_fields:
+            value = getattr(self, field)
+            if value is not None and not isinstance(value, pd.Timestamp):
+                try:
+                    setattr(self, field, pd.Timestamp(value))
+                except Exception as e:
+                    raise ValueError(f"Invalid datetime format for {field}: {value}") from e
+
         if isinstance(self.score_function, str):
             self.score_function = [self.score_function]
         self.score_function = [x.lower() for x in self.score_function]
@@ -132,6 +157,9 @@ class OptConfig:
         if self.algorithm not in ALGORITHMS:
             raise ValueError(f"Algorithm {self.algorithm} not in {ALGORITHMS}")
         
+        if self.name and "_" in self.name:
+            warnings.warn("Tags should not contain underscores. Underscores will be replaced with hyphens.")
+            self.name = self.name.replace("_", "-")
 
     def _initialize_model(self):
         """initialize the model object"""
@@ -144,15 +172,25 @@ class OptConfig:
         """validate that the target data is compatible with the model"""
         _validate_target_data(self.target_data_file, self.model)
 
-    def save_config(self, output_path):
+
+    def save_config(self):
         """save the configuration file"""
-        with open(output_path, 'w') as file:
+        with open(self.run_dir / "config.yml", 'w+') as file:
             # Convert Path objects to strings before saving
             cfg = self.__dict__.copy()
             for key, value in cfg.items():
                 if isinstance(value, Path):
                     cfg[key] = str(value)
-
+                elif isinstance(value, list):
+                    cfg[key] = [str(x) for x in value]
+                elif isinstance(value, dict):
+                    cfg[key] = {k: str(v) for k, v in value.items()}
+                elif isinstance(value, bool):
+                    cfg[key] = str(value).lower()
+                elif isinstance(value, pd.Timestamp) or isinstance(value, np.datetime64):
+                    cfg[key] = value.strftime('%Y-%m-%d %H:%M:%S')
+                elif isinstance(value, Model):
+                    cfg[key] = None  # Models cannot be serialized directly
             yaml.safe_dump(cfg, file)
 
         # def _standardize_config(self):

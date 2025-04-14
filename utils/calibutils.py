@@ -73,7 +73,9 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
         raise ValueError("opt_config_file must be a path to a yaml file or an OptConfig object")
     
     opt._standardize_config()
+    opt_config._initialize_run()
 
+    opt.save_config()
     # Load calibration data
     
     #cal_forcings, cal_targets = load_calibration_data(routine=opt.cfg["routine"])
@@ -103,7 +105,6 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     
     #initialize the run directory within the calibration directory
     # each run has its own timestamped directory within the 'run' folder of the calibration directory
-    opt_config.initialize_run()
 
     #save the calibration configuration to the run directory
     #opt.save_config(output_path=run_dir / 'opt_config.yaml')
@@ -499,33 +500,65 @@ def de_score_fun(
     
 
     spc = SimulationPreConfig()
+    #cal_params_list = ["section, element, index, new_val \n"]
+
+    
+
+
     for cp, val in zip(cal_params, values):
-        if val < cp.lower_limit:
-            val = cp.lower_limit
-        if val > cp.upper_limit:
-            val = cp.upper_limit
+
+
+
+        #if cp.relative:
+        #    val = cp.initial_value * (1 + val)
+
+        # apply physical constraints
+        #if val < cp.lower_limit:
+        #    val = cp.lower_limit
+        #if val > cp.upper_limit:
+        #    val = cp.upper_limit
+
 
 
     # if it's not a distributed parameter, get all element ids and apply the new value everywhere
         if not cp.distributed:
             with Simulation(in_model) as sim:
+                if not cp.relative:
+                    raise NotImplementedError("Non-distributed calibration params must be set to 'relative'")
+                
+                # the calibrated value 'val' is the relative change - so we need to calculate the new model values relative to the initial values
+                val_map = getattr(opt_config.model.inp, cp.section).loc[:,cp.attribute].to_dict()
+                for element_id, model_val in val_map.items():
+                    new_val = model_val * (1 + val)
 
-                match cp.section:
-                    case "subcatchments" | "infiltration":
-                        element_ids = [s.subcatchmentid for s in Subcatchments(sim)]
-                    case "conduits":
-                        element_ids = [l.linkid for l in Links(sim)]
-                    case "nodes":
-                        element_ids = [n.nodeid for n in Nodes(sim)]
-                    case _:
-                        raise ValueError(f"Section {cp.section} not recognized")
-                for element_id in element_ids:
-                    spc.add_update_by_token(section=cp.section, obj_id=element_id, index=cp.index, new_val=val)
+                    new_val = cp.truncate(new_val)
 
-        else:
-            spc.add_update_by_token(section=cp.section, obj_id=cp.element, index=cp.index, new_val=val)
-
+                    spc.add_update_by_token(section=cp.section, obj_id=element_id, index=cp.index, new_val=new_val)
         
+
+        # if it's a distributed calibration parameter
+        else:
+            # if the calibrated value 'val' is the relative change - so we need to calculate the new model values relative to the initial values
+            if cp.relative:
+                new_val = cp.initial_value * (1 + val)
+
+            # otherwise, the value can be set directly
+            else:
+                new_val = val
+            new_val = cp.truncate(new_val)
+            spc.add_update_by_token(section=cp.section, obj_id=cp.element, index=cp.index, new_val=new_val)
+
+            #newline = f'"{cp.section}","{cp.element}",{cp.index},{val}\n'
+            #cal_params_list.append(newline)
+
+        #if np.mod(counter.get_count(), opt_config.log_every_n) == 0:
+        #    if not (opt_config.run_dir / "calibration_parameters").exists():
+        #        os.mkdir(opt_config.run_dir / "calibration_parameters")
+
+        #    filename = str(opt_config.run_dir / "calibration_parameters" / f"calparams_i{counter.get_count()}.csv")
+        #    with open(filename, "w") as f:
+        #        f.writelines(cal_params_list)
+
         #cal_model_tmp = copy_temp_file(in_model)
         #model.inp.save(str(cal_model_tmp))
 
@@ -550,6 +583,11 @@ def de_score_fun(
     
     #cal_model_tmp = in_model
     
+    #with open("calibration_params.csv", "w") as file:
+    #    file.write("section,element,index,new_val\n")
+    #    for line in cal_params_list:
+    #        file.write(line)
+
     outputfile = "results.out"
     with Simulation(str(in_model), outputfile=outputfile, sim_preconfig=spc) as sim:
         sim.execute()
@@ -592,15 +630,15 @@ def de_score_fun(
             score_df_copy[col] = score_df_copy[col].apply(lambda x: -x)
 
 
-    if np.mod(iter,opt_config.log_every_n) == 0:
-        for node in score_df_copy.columns:
-            for tgt in score_df_copy.index:
-                now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-                line = f"{now},{iter},{tgt},{node},{score_df_copy.loc[tgt, node]}\n"
-                with open(opt_config.results_file_scores, 'a+') as f:
-                    f.write(line)
 
-        
+    for node in score_df_copy.columns:
+        for tgt in score_df_copy.index:
+            now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
+            line = f"{now},{iter},{tgt},{node},{score_df_copy.loc[tgt, node]}\n"
+            with open(opt_config.results_file_scores, 'a+') as f:
+                f.write(line)
+
+    if np.mod(iter,opt_config.log_every_n) == 0:        
         for cp, val in zip(cal_params, values):
             now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
             line = f"{now},{iter},{cp.section},{cp.attribute},{cp.element},{cp.initial_value},{val}\n"
@@ -614,7 +652,13 @@ def de_score_fun(
             for ts in timeseries_results.keys():
                 filename = opt_config.run_dir / "timeseries" / f"{ts}_{iter}.pkl"
                 timeseries_results[ts].to_pickle(filename)
+        
+        #if opt_config.save_models:
+        #    if not (opt_config.run_dir / "models").exists():
+        #        os.mkdir(opt_config.run_dir / "models")
+        #    shutil.copyfile(str(in_model), str(opt_config.run_dir / "models" / f"{iter}_model.inp"))
 
+    
     counter.increment()
 
     # Clean up, we will not need this model any more
@@ -773,13 +817,13 @@ def de_calibration(in_model,
 
     bounds = cal_params.get_bounds()
 
-    
     opt_args = opt_config.algorithm_options
     if opt_config.algorithm == "differential-evolution":
         opt_results = differential_evolution(func=opt_fun, bounds=bounds, **opt_args)
+
     elif opt_config.algorithm in ["Nelder-Mead","Powell","CG","BFGS","L-BFGS-B","TNC","COBYLA","SLSQP","trust-constr","dogleg","trust-ncg","trust-exact","trust-krylov"]:
-        
-        opt_results = minimize(method=opt_config.algorithm,fun=opt_fun, bounds=bounds, x0=[c.initial_value + 0.9*(c.initial_value - c.lower_limit) for c in cal_params], options=opt_args)
+
+        opt_results = minimize(method=opt_config.algorithm,fun=opt_fun, bounds=bounds, x0=[c.initial_value for c in cal_params], options=opt_args)
     else:
         raise NotImplementedError(f"Algorithm {opt_config.algorithm} not implemented")
     

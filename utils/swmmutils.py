@@ -337,7 +337,6 @@ def set_model_datetimes(model: Model, start_datetime=None, end_datetime=None, re
     if report_step:
         model.inp.options.loc['REPORT_STEP'] = datetime.strftime(report_step, '%H:%M:%S')
 
-
     return model
 
 
