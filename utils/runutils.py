@@ -25,7 +25,7 @@ def initialize_run(run_loc: Path, name: str):
     
     return x
 
-def summarize_runs(runs_dir:Path) -> list[Path]:
+def summarize_runs(runs_dir:Path, drop_incomplte=True) -> list[Path]:
     run_dirs = [dir for dir in runs_dir.iterdir() if dir.is_dir()]
     run_dates = [datetime.strptime(d.name.split("_")[1], "%d-%m-%y-%H%M%S") for d in run_dirs]
     df = pd.DataFrame(index=run_dirs, data=run_dates, columns=["dates"])
@@ -41,16 +41,33 @@ def summarize_runs(runs_dir:Path) -> list[Path]:
                 v = ', '.join([f"{k1}: {v1}" for k1, v1 in v.items()])
             df.loc[d, k] = v
 
-        if (not (d/"results_scores.txt").exists()) | (not (d/"results_params.txt").exists()):
-            df.loc[d, "status"] = "failed"
-        elif(len(pd.read_csv(d / "results_scores.txt")) == 0) | (len(pd.read_csv(d / "results_params.txt")) == 0):
-            df.loc[d, "status"] = "failed"
-        elif not (d/"calibrated_model.inp").exists():
-            df.loc[d, "status"] = "incomplete"
+
+
+        if not (d/"results_scores.txt").exists:
+            df.loc[d, "max_iter"] = 0
         else:
-            df.loc[d, "status"] = "complete"
+            scores = pd.read_csv(d/"results_scores.txt").rename(columns=lambda x: x.strip())
+            df.loc[d, "max_iter"] = len(scores)
+            df.loc[d, "best_score"] = scores["score"].min()
+        
+        cal_params_file = d / "calibration_parameters.csv"
+        params_fesults_file = d/"results_params.txt"
 
-        df = df.sort_values(by="dates")
+        if (not cal_params_file.exists()) | (not params_fesults_file.exists()):
+            df.loc[d, "max_iter"] = 0
+            continue
+
+        df_params = pd.read_csv(params_fesults_file).rename(columns=lambda x: x.strip())
+        cal_params = pd.read_csv(cal_params_file)
+
+        if "ii" not in df_params.columns:
+            df.loc[d, "max_iter"] = 0
+
+        if "ii" not in cal_params.columns:
+            df.loc[d, "max_iter"] = 0
+            
+    df = df.sort_values(by="dates")
+        
+    if drop_incomplte:
+        df = df[df["max_iter"] > 0]
     return df
-
-

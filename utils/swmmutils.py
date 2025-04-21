@@ -311,7 +311,7 @@ def get_model_datetimes(model:swmmio.Model):
 
 
 
-def set_model_datetimes(model: Model, start_datetime=None, end_datetime=None, report_step=None) -> Model:
+def set_model_datetimes(model: Model, start_datetime=None, end_datetime=None, report_step=None, dry_step=None, wet_step=None) -> Model:
     """
     Set the simulation start and end times in the model.
 
@@ -324,6 +324,8 @@ def set_model_datetimes(model: Model, start_datetime=None, end_datetime=None, re
     :returns: Model with updated simulation times.
     :rtype: swmmio.Model object
     """
+
+    
     if start_datetime:
         model.inp.options.loc['START_TIME'] = datetime.strftime(start_datetime, format='%H:%M:%S')
         model.inp.options.loc['START_DATE'] = datetime.strftime(start_datetime, format='%m/%d/%Y')
@@ -336,7 +338,10 @@ def set_model_datetimes(model: Model, start_datetime=None, end_datetime=None, re
 
     if report_step:
         model.inp.options.loc['REPORT_STEP'] = datetime.strftime(report_step, '%H:%M:%S')
-
+    if dry_step:
+        model.inp.options.loc['DRY_STEP'] = datetime.strftime(dry_step, '%H:%M:%S')
+    if wet_step:
+        model.inp.options.loc['WET_STEP'] = datetime.strftime(wet_step, '%H:%M:%S')
     return model
 
 

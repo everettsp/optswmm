@@ -7,6 +7,9 @@ from defs import SWMM_SECTION_SUBTYPES
 from utils.networkutils import get_upstream_nodes
 import swmmio
 
+from pathlib import Path
+from swmmio import Model
+from warnings import warn as warning
 
 from pyswmm import Simulation, SimulationPreConfig, Subcatchments, Nodes, Links
 
@@ -79,15 +82,19 @@ def tuple_to_str(tup: tuple) -> str:
     return '_'.join([str(x) for x in tup])
 
 class CalParam():
-    def __init__(self, 
+    def __init__(self,
                  section: str, 
-                 attribute: str, key:list[str]=["index"], 
+                 attribute: str,
+                 element: str = None,
+                 key:list[str]=["index"], 
                  lower: float = 0.0, 
                  upper: float = np.inf, 
                  lower_limit: float = -np.inf, 
                  upper_limit: float = np.inf, 
                  distributed: bool = False,
                  relative: bool = False,
+                 index: int = None,
+                 initial_value:float = None,
                  ):
         
         """
@@ -111,22 +118,23 @@ class CalParam():
         if type(key) is str:
             key = [key]
             
-        self.tag = ''
+        self.tag = '' # depreciated
         self.section = section
         self.attribute = attribute
-        self.element = None
-        self.key = key
+        self.element = element
+        self.key = key # for multi-indexed parameters (made ~irrelevant by sim preconfig)
         self.parent_section = ''
-        self.lower = lower
-        self.upper = upper
-        self.lower_limit = lower_limit
-        self.upper_limit = upper_limit
-        self.distributed = distributed
-        self.relative = relative
-
-        self.initial_value = None
-        self.index = None
-        self.row_num = None
+        self.ii = None  # index for mapping to cal results; set in get_initial_values
+        self.lower = lower # lower search
+        self.upper = upper # upper search
+        self.lower_limit = lower_limit # lower physical constraint
+        self.upper_limit = upper_limit # upper physical constraint
+        self.distributed = distributed # whether to distribute the parameter across all elements
+        self.relative = relative # relative change (e.g., 0.5 is +50% the initial value), in contrast to absolute (e.g., +5mm/hr)
+        self.initial_value = initial_value
+        self.x0 = None
+        self.index = index  # numeric integer used while setting sim preconfig
+        self.row_num = None # depreciated
         #self.distributed = False
         self._standardize()
 
@@ -276,7 +284,6 @@ class CalParam():
                 self.lower = self.lower_limit
             if self.upper > self.upper_limit:
                 self.upper = self.upper_limit
-
         return self
 
 
@@ -360,12 +367,9 @@ class CalParams(list[CalParam]):
         cps = []
 
         for cp in self:
-            
+
             if not cp.distributed:                
-                if cp.relative:
-                    cp.initial_value = 0.5
-                else:
-                    cp.initial_value = getattr(model.inp, cp.section).loc[:, cp.attribute].mean()
+                cp.initial_value = getattr(model.inp, cp.section).loc[:, cp.attribute].mean()
 
             else:
                 if len(cp.key) > 1:
@@ -379,9 +383,18 @@ class CalParams(list[CalParam]):
                     index = getattr(getattr(model.inp, cp.section),cp.key[0]).to_list()
                     cp.initial_value = getattr(model.inp, cp.section).loc[cp.element, cp.attribute]
 
+            if cp.relative:
+                cp.x0 = -0.01
+            else:
+                cp.x0 = cp.initial_value * 0.9
+
             if cp.initial_value != np.nan:
                 cps.append(cp)
 
+
+        # here we set a numeric index to the cal-params to map the cal params saved during cal
+        for ii in range(len(cps)):
+            cps[ii].ii = ii
         return CalParams(cps)
 
 
@@ -414,22 +427,21 @@ def cons_to_df(cons: list[CalParam]) -> pd.DataFrame:
     :rtype: pd.DataFrame
     """
 
-    df = pd.DataFrame(index=[cons.tag for cons in cons])
+    df = pd.DataFrame(index=range(len(cons)))
     df['section'] = [cons.section for cons in cons]
     df['attribute'] = [cons.attribute for cons in cons]
     df['element'] = [cons.element for cons in cons]
     df['key'] = [cons.key for cons in cons]
-    df['tag'] = [cons.tag for cons in cons]
+    df['ii'] = [cons.ii for cons in cons]
+    df['index'] = [cons.index for cons in cons]
     df['lower'] = [cons.lower for cons in cons]
     df['upper'] = [cons.upper for cons in cons]
     df['lower_limit'] = [cons.lower_limit for cons in cons]
     df['upper_limit'] = [cons.upper_limit for cons in cons]
     df['distributed'] = [cons.distributed for cons in cons]
+    df['relative'] = [cons.relative for cons in cons]
     df['initial_value'] = [cons.initial_value for cons in cons]
     df['parent_section'] = [cons.parent_section for cons in cons]
-    df['level'] = 0
-    df['node'] = ''
-    
     return df
 
 
@@ -549,3 +561,89 @@ def get_cal_params(routine, model):
     #            cps_distributed.remove(cp)
             
     return cps_distributed
+
+
+def create_simpreconfig(cps, vals, model_file):
+
+    if isinstance(model_file, Path):
+        model_file = str(model_file)
+
+    if len(cps) != len(vals):
+        raise ValueError("Length of cps and vals must match")
+
+    model = Model(model_file)
+    spc = SimulationPreConfig()
+
+    for cp, val in zip(cps, vals):
+        # if it's not a distributed parameter, get all element ids and apply the new value everywhere
+        if not cp.distributed:
+            with Simulation(model_file) as sim:
+                if not cp.relative:
+                    raise NotImplementedError("Non-distributed calibration params must be set to 'relative'")
+                
+                # the calibrated value 'val' is the relative change - so we need to calculate the new model values relative to the initial values
+                val_map = getattr(Model(model_file).inp, cp.section).loc[:,cp.attribute].to_dict()
+                for element_id, model_val in val_map.items():
+                    new_val = model_val * (1 + val)
+                    new_val = cp.truncate(new_val)
+                    spc.add_update_by_token(section=cp.section, obj_id=element_id, index=cp.index, new_val=new_val)
+        
+            # if it's a distributed calibration parameter
+        else:
+            # if the calibrated value 'val' is the relative change - so we need to calculate the new model values relative to the initial values
+            if cp.relative:
+                new_val = cp.initial_value * (1 + val)
+            # otherwise, the value can be set directly
+            else:
+                new_val = val
+                
+            new_val = cp.truncate(new_val)
+            spc.add_update_by_token(section=cp.section, obj_id=cp.element, index=cp.index, new_val=new_val)
+    return spc
+
+
+
+def get_simpreconfig_at_iter(run_dir, iter=None):
+    # load the calibration parameter values
+    param_file = run_dir / "results_params.txt"
+    params_df = pd.read_csv(param_file, sep=",", index_col=0)  # Adjust the separator if necessary
+
+    # load the calibration parameter metadata
+    cal_params = pd.read_csv(run_dir / "calibration_parameters.csv")
+    df = cal_params.merge(params_df, on="ii", how="inner")
+
+    if iter is None:
+        iter = int(df.iter.max())
+        warning("iter not specified, using last iter")
+
+
+    if iter not in df.iter.unique():
+        iter = df.iter.sub(iter).abs().idxmin()
+        warning(f"iter {iter} not found, using closest iter {df.iter[iter]} instead")
+
+    # filter the dataframe to only include the specified iteration
+    df = df[df.iter == iter]
+
+
+
+    # convert dataframe results to CalParams object
+    cps = []
+    for name, row in df.iterrows():
+        cp = CalParam(section=row.section,
+                attribute=row.attribute,
+                element=row.element,
+                index=row.index,
+                lower=row.lower,
+                upper=row.upper,
+                upper_limit=row.upper_limit,
+                lower_limit=row.lower_limit,
+                relative=row.relative,
+                distributed=row.distributed,
+                initial_value = row.initial_value)
+        cps.append(cp)
+    cps = CalParams(cps)
+    model_file = str(run_dir.parent.parent / f"{run_dir.parent.parent.stem}_cal.inp")
+
+    spc=create_simpreconfig(cps=cps, vals=df.cal_val, model_file=model_file)
+
+    return spc

@@ -8,7 +8,7 @@ import pickle
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
-
+import contextlib
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -17,7 +17,6 @@ import yaml
 import swmmio
 from swmmio import Model
 from pyswmm import Simulation, Output, Nodes, Links, Subcatchments, SimulationPreConfig
-
 from swmm.toolkit import shared_enum
 
 
@@ -26,6 +25,7 @@ from scipy.optimize import differential_evolution, minimize
 from tqdm import tqdm
 from utils.swmmutils import get_node_timeseries
 from utils.standardization import _standardize_pkl_data
+#from utils import performance as pf
 from utils import perfutils as pf
 
 
@@ -73,8 +73,8 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
         raise ValueError("opt_config_file must be a path to a yaml file or an OptConfig object")
     
     opt._standardize_config()
-    opt_config._initialize_run()
-
+    opt._initialize_run()
+    cal_params.to_dataframe().to_csv(opt.run_dir / "calibration_parameters.csv", index=True)
     opt.save_config()
     # Load calibration data
     
@@ -502,9 +502,6 @@ def de_score_fun(
     spc = SimulationPreConfig()
     #cal_params_list = ["section, element, index, new_val \n"]
 
-    
-
-
     for cp, val in zip(cal_params, values):
 
 
@@ -530,21 +527,18 @@ def de_score_fun(
                 val_map = getattr(opt_config.model.inp, cp.section).loc[:,cp.attribute].to_dict()
                 for element_id, model_val in val_map.items():
                     new_val = model_val * (1 + val)
-
                     new_val = cp.truncate(new_val)
-
                     spc.add_update_by_token(section=cp.section, obj_id=element_id, index=cp.index, new_val=new_val)
         
-
         # if it's a distributed calibration parameter
         else:
             # if the calibrated value 'val' is the relative change - so we need to calculate the new model values relative to the initial values
             if cp.relative:
                 new_val = cp.initial_value * (1 + val)
-
             # otherwise, the value can be set directly
             else:
                 new_val = val
+                
             new_val = cp.truncate(new_val)
             spc.add_update_by_token(section=cp.section, obj_id=cp.element, index=cp.index, new_val=new_val)
 
@@ -590,7 +584,9 @@ def de_score_fun(
 
     outputfile = "results.out"
     with Simulation(str(in_model), outputfile=outputfile, sim_preconfig=spc) as sim:
-        sim.execute()
+        with open(os.devnull, 'w') as fnull:
+            with contextlib.redirect_stdout(fnull):
+                sim.execute()
 
     #Model(cal_model_tmp).inp.save()
 
@@ -621,15 +617,12 @@ def de_score_fun(
 
     iter = counter.get_count()
 
-
     # make a copy of the score df for writing to the results file
     score_df_copy = score_df.copy()
     # if NSE, flip the sign back (we flipped it in eval_model since we can only minimize)
     for col in score_df_copy.columns:
         if col in MAXIMIZE_FUNCTIONS:
             score_df_copy[col] = score_df_copy[col].apply(lambda x: -x)
-
-
 
     for node in score_df_copy.columns:
         for tgt in score_df_copy.index:
@@ -641,7 +634,7 @@ def de_score_fun(
     if np.mod(iter,opt_config.log_every_n) == 0:        
         for cp, val in zip(cal_params, values):
             now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-            line = f"{now},{iter},{cp.section},{cp.attribute},{cp.element},{cp.initial_value},{val}\n"
+            line = f"{now},{iter},{cp.ii},{val}\n"
             with open(opt_config.results_file_params, 'a+') as f:
                 f.write(line)
 
@@ -706,7 +699,6 @@ def eval_model(outputfile, cal_targets, opt_config):
         # TODO: add support for multiple performance functions
     score_fun = getattr(pf,score_function)
 
-    
     station_ids = np.unique(cal_targets.columns.get_level_values(1))
     params = np.unique(cal_targets.columns.get_level_values(0))
 
@@ -714,10 +706,8 @@ def eval_model(outputfile, cal_targets, opt_config):
     params = [p for p in params if p in opt_config.target_variables]
     if len(params) == 0:
         raise ValueError(f"No parameters to evaluate; target_variables: {opt_config.target_variables}, target_data: {cal_targets.columns.get_level_values(0)}")
-
-    obs = cal_targets.loc[:, params]
     
-
+    obs = cal_targets.loc[:, params]
 
     scores = pd.DataFrame(index=station_ids, columns=params)
     dfs = []
@@ -823,7 +813,7 @@ def de_calibration(in_model,
 
     elif opt_config.algorithm in ["Nelder-Mead","Powell","CG","BFGS","L-BFGS-B","TNC","COBYLA","SLSQP","trust-constr","dogleg","trust-ncg","trust-exact","trust-krylov"]:
 
-        opt_results = minimize(method=opt_config.algorithm,fun=opt_fun, bounds=bounds, x0=[c.initial_value for c in cal_params], options=opt_args)
+        opt_results = minimize(method=opt_config.algorithm,fun=opt_fun, bounds=bounds, x0=[c.x0 for c in cal_params], options=opt_args)
     else:
         raise NotImplementedError(f"Algorithm {opt_config.algorithm} not implemented")
     

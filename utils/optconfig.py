@@ -40,6 +40,9 @@ class OptConfig:
             calibration_end_date:str=None,
             validation_start_date:str=None,
             validation_end_date:str=None,
+            report_step:pd.Timestamp=None,
+            dry_step:pd.Timestamp=None,
+            wet_step:pd.Timestamp=None,
             ):
         
         """initialize the configuration file"""
@@ -69,6 +72,10 @@ class OptConfig:
         self.calibration_end_date = calibration_end_date
         self.validation_start_date = validation_start_date
         self.validation_end_date = validation_end_date
+        self.report_step = report_step
+        self.dry_step = dry_step
+        self.wet_step = wet_step
+
 
         # if config file provided, load and assign, overwriting default values
         if config_file is not None:
@@ -86,7 +93,7 @@ class OptConfig:
         self.model = Model(str(self.model_file))
         self._validate_target_data()
         self._assign_default_opt_options()
-
+        
 
 
         if not self.run_folder.exists():
@@ -104,7 +111,7 @@ class OptConfig:
         
         if not self.results_file_params.exists():
             with open(self.results_file_params, 'a+') as f:
-                f.write('datetime,iter,section,attribute,element,init_val,cal_val\n')
+                f.write('datetime,iter,ii,cal_val\n')
             
     def load_config(self, config_file):
         """load the configuration file"""
@@ -165,7 +172,14 @@ class OptConfig:
         """initialize the model object"""
         mdl = Model(str(self.model_file))
         if self.calibration_start_date is not None:
-            mdl = set_model_datetimes(model=mdl, start_datetime=self.calibration_start_date, end_datetime=self.calibration_end_date)
+            mdl = set_model_datetimes(
+                model=mdl,
+                start_datetime=self.calibration_start_date,
+                end_datetime=self.calibration_end_date,
+                report_step=self.report_step,
+                dry_step=self.dry_step,
+                wet_step=self.wet_step,)
+            
             mdl.inp.save()
 
     def _validate_target_data(self):
