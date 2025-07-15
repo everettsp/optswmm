@@ -50,7 +50,6 @@ for station_id in tqdm(station_ids):
     midpoint = len(non_nan_discharge_iis) // 2
     training_iis = non_nan_discharge_iis[:midpoint]
     testing_iis = non_nan_discharge_iis[midpoint:]
-    
 
     max_train_len_days = 365
     if len(training_iis) < max_train_len_days:
@@ -61,7 +60,6 @@ for station_id in tqdm(station_ids):
     training_end_date = df.index[training_iis[-1]]
     if (training_iis[-1] - training_iis[0]) > max_train_len_days:
         training_end_date = training_start_date + pd.Timedelta(days=max_train_len_days)
-
 
     testing_start_date = df.index[testing_iis[0]]
     testing_end_date = df.index[testing_iis[-1]]
@@ -75,7 +73,7 @@ for station_id in tqdm(station_ids):
         algorithm = "Powell",
         algorithm_options={"maxiter":5, "ftol":0.01},
         score_function=["nse"],
-        name="lumped-1yr-v33", # no underscores
+        name="higher_res", # no underscores
         target_variables=["discharge(cms)"],
         save_timeseries=True,
         calibration_start_date = training_start_date,

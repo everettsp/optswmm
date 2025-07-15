@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: optswmm
+Version: 0.1.0
+Summary: Simple package for optimizing SWMM parameters
+Home-page: https://github.com/everettsp/optswmm
+Author: Everett Snieder
+Author-email: everett.snieder@gmail.com
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.6
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: matplotlib
+Requires-Dist: swmm-toolkit
+Requires-Dist: pyswmm
+Requires-Dist: swmmio
+Requires-Dist: scikit-learn
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

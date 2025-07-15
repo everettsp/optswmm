@@ -1,0 +1,7 @@
+numpy
+pandas
+matplotlib
+swmm-toolkit
+pyswmm
+swmmio
+scikit-learn

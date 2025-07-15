@@ -1,2 +1,0 @@
-data_dir: C:\Users\everett\Documents\GitHub\sewmod\data # data dir, if outside repo
-path_exec_swmm: C:\Program Files\EPA SWMM 5.2.4 (64-bit)\runswmm # loc of SWMM executable
