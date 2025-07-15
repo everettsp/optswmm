@@ -3,8 +3,8 @@
 import os
 import time
 import uuid
-import shutil
 import pickle
+import matplotlib.pyplot as plt
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,40 +12,32 @@ import contextlib
 import numpy as np
 import pandas as pd
 import networkx as nx
-import pyswmm.simulation
-import yaml
-import swmmio
 from swmmio import Model
 from pyswmm import Simulation, Output, Nodes, Links, Subcatchments, SimulationPreConfig
 from swmm.toolkit import shared_enum
 
-
 from swmm.toolkit.shared_enum import SubcatchAttribute, NodeAttribute, LinkAttribute
 from scipy.optimize import differential_evolution, minimize
 from tqdm import tqdm
-from utils.swmmutils import get_node_timeseries
-from utils.standardization import _standardize_pkl_data
-#from utils import performance as pf
-from utils import perfutils as pf
 
-
-from utils.functions import sync_timeseries, invert_dict, load_dict
-from utils.networkutils import get_upstream_nodes, get_downstream_nodes
-from utils.swmmutils import get_model_path, run_swmm, dataframe_to_dat, get_predictions_at_nodes
-from utils.calparams import CalParam, get_cal_params, get_calibration_order
-
-from defs import CALIBRATION_ROUTINES, CALIBRATION_FORCINGS, ALGORITHMS
 
 from multiprocessing import freeze_support
 
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-import matplotlib.pyplot as plt
+
+from optswmm.utils.swmmutils import get_node_timeseries
+from optswmm.utils.standardization import _standardize_pkl_data
+#from utils import performance as pf
+from optswmm.utils import perfutils as pf
+from optswmm.utils.functions import sync_timeseries, invert_dict, load_dict
+from optswmm.utils.networkutils import get_upstream_nodes, get_downstream_nodes
+from optswmm.utils.swmmutils import get_model_path, run_swmm, dataframe_to_dat, get_predictions_at_nodes
+from optswmm.utils.calparams import CalParam, get_cal_params, get_calibration_order
 
 # these functions get their sign flipped in the optimization routine
 MAXIMIZE_FUNCTIONS = ["nse", "kge", "rsr", "rsq", "pearsonr", "spearmanr"]
-
 
 # Load conceptual SWMM model
 model_dir = Path('dat/winnipeg1')
@@ -664,10 +656,6 @@ def de_score_fun(
     return score_df[opt_config.score_function].mean()
 
 
-
-
-
-
 def eval_model(outputfile, cal_targets, opt_config):
     """
     Evaluate the model using the calibration targets.
@@ -727,7 +715,6 @@ def eval_model(outputfile, cal_targets, opt_config):
     df.columns = pd.MultiIndex.from_tuples(df.columns)
     sim = df.copy()
 
-    
     sim, obs = sync_timeseries(sim, obs)
     #sim = get_predictions_at_nodes(model=Model(cal_model_tmp), nodes=eval_nodes, param="FLOW_RATE")
     #sim = get_node_timeseries(model=Model(cal_model_tmp),nodes=eval_nodes, params=["TOTAL_INFLOW"])["TOTAL_INFLOW"][eval_nodes]
@@ -741,11 +728,8 @@ def eval_model(outputfile, cal_targets, opt_config):
 
     #obs = obs.iloc[opt_config["warmup_length"]:, :]
     #sim = sim.iloc[opt_config["warmup_length"]:, :]
-
     score = [score_fun(obs.loc[:, col], sim.loc[:, col]) for col in obs.columns]
-
     scores = pd.DataFrame(index=obs.columns, data=score, columns=[score_function])
-
 
     if opt_config.normalize:
         obs = denormalise(obs, scaler)

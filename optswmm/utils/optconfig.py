@@ -1,7 +1,6 @@
 """Class to handle the configuration file for the optimization process"""
 
 import yaml
-from defs import ALGORITHMS
 from pathlib import Path
 import warnings
 import pandas as pd
@@ -9,10 +8,11 @@ import numpy as np
 
 from swmmio import Model
 
-
-from utils.standardization import _standardize_file, _validate_target_data
-from utils.runutils import initialize_run
-from utils.swmmutils import set_model_datetimes
+from optswmm.defs import ALGORITHMS
+from optswmm.utils.standardization import _standardize_file, _validate_target_data
+from optswmm.utils.runutils import initialize_run
+from optswmm.utils.swmmutils import set_model_datetimes
+from optswmm.defs.filenames import DEFAULT_SCORES_FILENAME, DEFAULT_CAL_PARAMS_FILENAME, DEFAULT_PARAMS_FILENAME, DEFAULT_MODEL_FILENAME
 
 
 class OptConfig:
@@ -95,14 +95,13 @@ class OptConfig:
         self._assign_default_opt_options()
         
 
-
         if not self.run_folder.exists():
             self.run_folder.mkdir()
 
         self.run_dir = initialize_run(self.run_folder, self.name)
-        self.results_file_params = self.run_dir / 'results_params.txt'
-        self.results_file_scores = self.run_dir / 'results_scores.txt'
-        self.calibrated_model_file = self.run_dir / 'calibrated_model.inp'
+        self.results_file_params = self.run_dir / DEFAULT_PARAMS_FILENAME
+        self.results_file_scores = self.run_dir / DEFAULT_SCORES_FILENAME
+        self.calibrated_model_file = self.run_dir / DEFAULT_MODEL_FILENAME
 
 
         if not self.results_file_scores.exists():
@@ -111,7 +110,7 @@ class OptConfig:
         
         if not self.results_file_params.exists():
             with open(self.results_file_params, 'a+') as f:
-                f.write('datetime,iter,ii,cal_val\n')
+                f.write('datetime,iter,ii,cal_val,physical_val\n')
             
     def load_config(self, config_file):
         """load the configuration file"""

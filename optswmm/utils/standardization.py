@@ -1,7 +1,13 @@
+
 import os
 from pathlib import Path
 import re
+import warnings
+import pandas as pd
 
+from swmmio import Model
+
+from optswmm.utils.swmmutils import get_model_datetimes
 
 def _standardize_ext(ext:str):
     if not isinstance(ext, str):
@@ -68,7 +74,6 @@ def _standardize_dir(directory:str|Path, exists:bool=True):
         
     return directory
 
-import pandas as pd
 
 def _check_same_columns(df1: pd.DataFrame, df2: pd.DataFrame):
     """
@@ -133,9 +138,6 @@ def _standardize_pkl_data(data:pd.DataFrame | str | Path) -> pd.DataFrame:
 
 
 
-from swmmio import Model
-from utils.swmmutils import get_model_datetimes
-import warnings
 
 def _validate_target_data(tgt:pd.DataFrame | str | Path, model:Model) -> bool:
     """
@@ -152,8 +154,6 @@ def _validate_target_data(tgt:pd.DataFrame | str | Path, model:Model) -> bool:
     # check that all target stations are in the model
     model_nodes = model.nodes().index.tolist()
     
-
-
     if isinstance(tgt.columns, pd.MultiIndex):
         
         if 'nodes' not in tgt.columns.names:

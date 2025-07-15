@@ -1,6 +1,7 @@
 """Additional SWMM functions, mainly for quickly fetching simulation results and running the model"""
 
 import os
+import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -12,7 +13,8 @@ import yaml
 from swmm.toolkit.shared_enum import SubcatchAttribute, NodeAttribute, LinkAttribute
 from pyswmm import Output
 from swmmio import Model
-
+from optswmm.defs import SWMM_DATETIME_FMT
+from contextlib import contextmanager
 
 
 
@@ -223,8 +225,6 @@ def dataframe_to_dat(filename, df):
                 f.write(line+"\n")
 
 
-from contextlib import contextmanager
-import sys, os
 
 @contextmanager
 def suppress_stdout():
@@ -299,7 +299,6 @@ def foo_runswmm(inp_path:Path):
     #print("command = ", command,"\n\n") # DEBUG
     subprocess.run(command)    
 
-from defs import SWMM_DATETIME_FMT
 
 
 def get_model_datetimes(model:swmmio.Model):

@@ -1,7 +1,6 @@
 """Class to handle the configuration file for the optimization process"""
 
 import yaml
-from defs import ALGORITHMS, CALIBRATION_ROUTINES, CONFIG_OPTIONS
 from pathlib import Path
 import warnings
 import pandas as pd
@@ -9,10 +8,10 @@ import numpy as np
 
 from swmmio import Model
 
-
-from utils.standardization import _standardize_file, _validate_target_data
-from utils.runutils import initialize_run
-from utils.swmmutils import set_model_datetimes
+from optswmm.utils.standardization import _standardize_file, _validate_target_data
+from optswmm.utils.runutils import initialize_run
+from optswmm.utils.swmmutils import set_model_datetimes
+from optswmm.defs import ALGORITHMS, CALIBRATION_ROUTINES, CONFIG_OPTIONS
 
 
 class OptConfig:

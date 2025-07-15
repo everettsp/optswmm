@@ -10,11 +10,11 @@ from pyswmm import Simulation, Nodes, Links, Subcatchments, SystemStats, Output
 from swmm.toolkit import shared_enum
 from swmmio import Model
 
-from utils.calibutils import calibrate
-from utils.swmmutils import set_model_datetimes
-from utils.calparams import CalParam, CalParams
-from utils.optconfig import OptConfig
-import utils.perfutils as pf
+from optswmm.utils.calibutils import calibrate
+from optswmm.utils.swmmutils import set_model_datetimes
+from optswmm.utils.calparams import CalParam, CalParams
+from optswmm.utils.optconfig import OptConfig
+import optswmm.utils.perfutils as pf
 import warnings
 from tqdm import tqdm
 
@@ -73,7 +73,7 @@ for station_id in tqdm(station_ids):
         algorithm = "Powell",
         algorithm_options={"maxiter":5, "ftol":0.01},
         score_function=["nse"],
-        name="higher_res", # no underscores
+        name="debug", # no underscores
         target_variables=["discharge(cms)"],
         save_timeseries=True,
         calibration_start_date = training_start_date,

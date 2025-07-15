@@ -502,6 +502,7 @@ def de_score_fun(
 
     spc = SimulationPreConfig()
     #cal_params_list = ["section, element, index, new_val \n"]
+    new_vals = []
 
     for cp, val in zip(cal_params, values):
 
@@ -529,6 +530,8 @@ def de_score_fun(
                 for element_id, model_val in val_map.items():
                     new_val = model_val * (1 + val)
                     new_val = cp.truncate(new_val)
+
+
                     spc.add_update_by_token(
                         section=cp.section,
                         obj_id=element_id,
@@ -536,6 +539,8 @@ def de_score_fun(
                         new_val=new_val,
                         row_num=cp.row_index
                     )
+                    new_vals.append(new_val)
+                    #print(f"""Updating {cp.section} {element_id} {cp.attribute} to {new_val} (relative change of {val})""")
 
         # if it's a distributed calibration parameter
         else:
@@ -547,53 +552,14 @@ def de_score_fun(
                 new_val = val
                 
             new_val = cp.truncate(new_val)
+
+            new_vals.append(new_val)
             spc.add_update_by_token(section=cp.section, obj_id=cp.element, index=cp.col_index, new_val=new_val, row_num=cp.row_index)
 
-            #newline = f'"{cp.section}","{cp.element}",{cp.index},{val}\n'
-            #cal_params_list.append(newline)
+    outputfile = str(Path(in_model).with_suffix('.out').resolve())
 
-        #if np.mod(counter.get_count(), opt_config.log_every_n) == 0:
-        #    if not (opt_config.run_dir / "calibration_parameters").exists():
-        #        os.mkdir(opt_config.run_dir / "calibration_parameters")
-
-        #    filename = str(opt_config.run_dir / "calibration_parameters" / f"calparams_i{counter.get_count()}.csv")
-        #    with open(filename, "w") as f:
-        #        f.writelines(cal_params_list)
-
-        #cal_model_tmp = copy_temp_file(in_model)
-        #model.inp.save(str(cal_model_tmp))
-
-
-
-    # fix blank timeseries bug in swmmio (converts "" to NaN when reading, 
-    # but doesn't write "" to new file), when editing inflows section
-    #model = fix_model_strings(model)
-
-    # Save the model to a file, then read it again
-    # Must save to a file because `run_swmm()` 
-    # (and the actual SWMM program) takes a *path*
-    # as input argument. 
-    
-    # Make the file name unique for parallel computing.
-    # Add 'TEMPFILE' tag for cleanup later, if needed.
-    
-    #cal_model_tmp
-    # run SWWM
-    #shutil.copyfile(cal_model, cal_model_tmp)
-    #model.inp.save(str(cal_model_tmp))
-    
-    #cal_model_tmp = in_model
-    
-    #with open("calibration_params.csv", "w") as file:
-    #    file.write("section,element,index,new_val\n")
-    #    for line in cal_params_list:
-    #        file.write(line)
-
-    outputfile = "results.out"
     with Simulation(str(in_model), outputfile=outputfile, sim_preconfig=spc) as sim:
-        with open(os.devnull, 'w') as fnull:
-            with contextlib.redirect_stdout(fnull):
-                sim.execute()
+        sim.execute()   
 
     #Model(cal_model_tmp).inp.save()
 
@@ -601,7 +567,7 @@ def de_score_fun(
     #os.remove(str(cal_model_tmp))
 
 
-        score_df, timeseries_results = eval_model(outputfile=outputfile, cal_targets=cal_targets, opt_config=opt_config)
+    score_df, timeseries_results = eval_model(outputfile=outputfile, cal_targets=cal_targets, opt_config=opt_config)
     # weighted sum of multi-objective scores, mean across eval nodes
     # default uniform weights
 
@@ -624,6 +590,7 @@ def de_score_fun(
 
     iter = counter.get_count()
 
+    
     # make a copy of the score df for writing to the results file
     score_df_copy = score_df.copy()
     # if NSE, flip the sign back (we flipped it in eval_model since we can only minimize)
@@ -631,17 +598,18 @@ def de_score_fun(
         if col in MAXIMIZE_FUNCTIONS:
             score_df_copy[col] = score_df_copy[col].apply(lambda x: -x)
 
-    for node in score_df_copy.columns:
-        for tgt in score_df_copy.index:
-            now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-            line = f"{now},{iter},{tgt},{node},{score_df_copy.loc[tgt, node]}\n"
-            with open(opt_config.results_file_scores, 'a+') as f:
-                f.write(line)
+    mi = score_df_copy.index.to_list()
+
+    for m in mi:
+        now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
+        line = f"{now},{iter},{m[0]},{m[1]},{opt_config.score_function[0]},{score_df_copy.loc[m, opt_config.score_function[0]]}\n"
+        with open(opt_config.results_file_scores, 'a+') as f:
+            f.write(line)
 
     if np.mod(iter,opt_config.log_every_n) == 0:        
-        for cp, val in zip(cal_params, values):
+        for ii, cp in enumerate(cal_params):
             now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-            line = f"{now},{iter},{cp.ii},{val}\n"
+            line = f"{now},{iter},{cp.ii},{values[ii]},{new_vals[ii]}\n"
             with open(opt_config.results_file_params, 'a+') as f:
                 f.write(line)
 
@@ -750,12 +718,13 @@ def eval_model(outputfile, cal_targets, opt_config):
 
     scores = pd.DataFrame(index=station_ids, columns=params)
 
-
     df = get_simulation_results(outputfile, station_ids, params)
+
     sim = df.copy()
 
-    
     sim, obs = sync_timeseries(sim, obs)
+
+    #print(obs.head())
     #sim = get_predictions_at_nodes(model=Model(cal_model_tmp), nodes=eval_nodes, param="FLOW_RATE")
     #sim = get_node_timeseries(model=Model(cal_model_tmp),nodes=eval_nodes, params=["TOTAL_INFLOW"])["TOTAL_INFLOW"][eval_nodes]
     #sim = sim.resample('15min').mean()

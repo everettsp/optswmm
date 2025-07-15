@@ -3,15 +3,16 @@
 import pandas as pd
 import numpy as np
 from copy import deepcopy
-from defs import SWMM_SECTION_SUBTYPES
-from utils.networkutils import get_upstream_nodes
 import swmmio
-
 from pathlib import Path
 from swmmio import Model
 from warnings import warn as warning
 
 from pyswmm import Simulation, SimulationPreConfig, Subcatchments, Nodes, Links
+
+from optswmm.defs import SWMM_SECTION_SUBTYPES
+from optswmm.utils.networkutils import get_upstream_nodes
+
 
 PARAM_INDICES = {
     "subcatchments": {
@@ -121,7 +122,7 @@ class CalParam():
                  col_index: int = None,
                  initial_value:float = None,
                  row_attribute: str = None,
-                 row_index: int = None,
+                 row_index: int = 0,
                  ):
         
         """

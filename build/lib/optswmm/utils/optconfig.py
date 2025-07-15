@@ -1,7 +1,6 @@
 """Class to handle the configuration file for the optimization process"""
 
 import yaml
-from defs import ALGORITHMS
 from pathlib import Path
 import warnings
 import pandas as pd
@@ -9,11 +8,10 @@ import numpy as np
 
 from swmmio import Model
 
-
-from utils.standardization import _standardize_file, _validate_target_data
-from utils.runutils import initialize_run
-from utils.swmmutils import set_model_datetimes
-
+from optswmm.defs import ALGORITHMS
+from optswmm.utils.standardization import _standardize_file, _validate_target_data
+from optswmm.utils.runutils import initialize_run
+from optswmm.utils.swmmutils import set_model_datetimes
 
 class OptConfig:
     """Class to handle the configuration file for the optimization process"""
@@ -111,7 +109,7 @@ class OptConfig:
         
         if not self.results_file_params.exists():
             with open(self.results_file_params, 'a+') as f:
-                f.write('datetime,iter,ii,cal_val\n')
+                f.write('datetime,iter,ii,cal_val,physical_val\n')
             
     def load_config(self, config_file):
         """load the configuration file"""
