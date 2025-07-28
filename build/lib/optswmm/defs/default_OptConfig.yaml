@@ -1,0 +1,41 @@
+# SWMM calibration config. file
+
+routine: "dry" #
+base_model_dir: "dat/winnipeg1" # directory containing the uncalibrated model
+base_model_name: "conceptual_model_pollutant.inp" # name of the uncalibrated model
+calibration_dir: ""
+
+log_every_n: 20 # recurrence of logging scores and parameter values during calibration; recommended >10, file can get large
+start_date: None # format: 'YYYY-MM-DD HH:MM:SS'; None infers the range from the calibration data
+end_date: None
+do_parallel: False
+hierarchial: False # if True, calibrate nodes in sequence, from upstream to downstream; if False, calibrate all nodes simultaneously
+calibration_nodes: #nodes to calibrate; 'all' calibrates all nodes. Must be a subset of nodes included in the target data.
+  - all
+
+warmup_length: 48 # length of warmup period in days to ignore simulation results
+normalize: False # normalize prior to calculating scores
+score_function: "nse" # currently only 'nse' and 'mse' is supported
+
+target_variables: # variable names as defined in 'load_calibration_data'; formatted as parameter:weight
+  flow: 1
+  depth: 1
+
+
+# CALIBRATION METHOD
+# currently only 'diffevo' and 'minimize' are supported
+# calibration will only use the parameters for the respective algorithm (others are ignored)
+
+# prefix 'diffevol' for differential evolution parameters
+diffevol_maxiter: 2
+diffevol_popsize: 20
+diffevol_workers: 12
+diffevol_mutation: 1.2
+diffevol_seed: 0
+
+# prefix 'minimize' for scipy.optimize.minimize parameters
+algorithm: Nelder-Mead #method for 'minimize' 
+minimize_maxiter: 100
+minimize_xatol: 0.0001
+minimize_disp: True
+minimize_adaptive: True

@@ -1,4 +1,4 @@
-"""TEST"""
+"""SWMM Calibration Parameters Module"""
 
 import pandas as pd
 import numpy as np
@@ -14,7 +14,7 @@ from optswmm.defs import SWMM_SECTION_SUBTYPES, ROW_ATTRIBUTES, ROW_INDICES, PAR
 from optswmm.utils.networkutils import get_upstream_nodes
 
 
-
+from typing import Optional
 
 #DEFAULT_CHANGES = ['relative', 'absolute']
 
@@ -46,7 +46,7 @@ class CalParam():
                  initial_value:float = np.nan,
                  opt_value:float = np.nan,
                  opt_value_absolute:float = np.nan,
-                 row_attribute: str = '',
+                 row_attribute: Optional[str] = None,
                  row_index: int = 0,
                  level: int = 0,
                  ii: int = 0,
@@ -92,6 +92,13 @@ class CalParam():
         self.col_index = col_index  # numeric integer used while setting sim preconfig
         self.row_index = row_index
         self.row_attribute = row_attribute # used for hydrographs, e.g., 'Short', 'Medium', 'Long'
+        self.opt_value = opt_value # value after optimization
+        self.opt_value_absolute = opt_value_absolute # absolute value after optimization
+        self.level = level # used for calibration order
+        self.node = None # used for calibration order
+        self.tag = "{}.{}.{}".format(self.section, self.attribute, self.element) # unique tag for the parameter
+        self.ii = ii  # index for mapping to cal results; set in get_initial_values
+        # if self.row_attribute is not None:
         #self.distributed = False
         self._standardize()
 
@@ -355,23 +362,25 @@ class CalParams(list[CalParam]):
         """
         return _cons_to_df(self)
 
-    def from_df(self, filename:Path) -> "CalParams":
+    def from_df(self, filename: Path) -> "CalParams":
         """
         Convert a DataFrame to a list of CalParams.
 
-        :param df: DataFrame to convert
-        :type df: pd.DataFrame
+        :param filename: Path to CSV file to read
+        :type filename: Path
         :return: List of CalParams
         :rtype: CalParams
         """
         df = pd.read_csv(filename, index_col=0)
+        df = df.replace({np.nan: None})
+        
         cps = []
         for _, row in df.iterrows():
             cp = CalParam(
                 section=row['section'],
                 attribute=row['attribute'],
                 element=row['element'],
-                key=row['key'],
+                key=eval(row['key']) if isinstance(row['key'], str) else row['key'],
                 lower=row['lower'],
                 upper=row['upper'],
                 lower_limit=row['lower_limit'],
@@ -381,14 +390,105 @@ class CalParams(list[CalParam]):
                 relative_bounds=row['relative_bounds'],
                 col_index=row['col_index'],
                 initial_value=row['initial_value'],
-                opt_value=row['opt_value'],
-                opt_value_absolute=row['opt_value_absolute'],
-                row_attribute=row['row_attribute'],
+                opt_value=row.get('opt_value', np.nan),
+                opt_value_absolute=row.get('opt_value_absolute', np.nan),
+                row_attribute=row.get('row_attribute', ''),
             )
             cps.append(cp)
         return CalParams(cps)
 
+    def set_values(self, values):
+        """
+        Set the optimization values for each calibration parameter.
+
+        :param values: List of optimization values.
+        :type values: list[float]
+        """
+        if len(values) != len(self):
+            raise ValueError("Length of values must match length of calibration parameters.")
+
+        for cp, val in zip(self, values):
+            cp.opt_value = val
+            if cp.relative:
+                cp.opt_value_absolute = cp.initial_value * (1 + val)
+            else:
+                cp.opt_value_absolute = val
+
+    def make_simulation_preconfig(self, model):
+        """
+        Set up SimulationPreConfig with parameter updates.
+        
+        :param cal_params: List of calibration parameters.
+        :type cal_params: list[CalParam]
+        :param values: Parameter values from optimization.
+        :type values: list[float]
+        :param opt_config: Optimization configuration.
+        :type opt_config: OptConfig
+        :returns: Configured SimulationPreConfig object
+        :rtype: SimulationPreConfig
+        """
+        spc = SimulationPreConfig()
+
+
+        for cp in self:
+            val = cp.opt_value_absolute
+            
+            # Handle non-distributed parameters
+            if not cp.distributed:
+                if not cp.relative:
+                    raise NotImplementedError("Non-distributed calibration params must be set to 'relative'")
+
+                # Get the section dataframe and element IDs
+                section_df = getattr(model.inp, cp.section)
+                element_ids = section_df.index.unique()
+
+                for element_id in element_ids:
+                    """
+                    # Handle multi-index sections (e.g., hydrographs, LIDs, etc.)
+                    if len(section_df.index.unique()) != len(section_df):
+                        subsec = section_df.loc[[element_id], :]
+                        model_val = subsec.iloc[cp.row_index, :][cp.attribute]
+                    # Handle single-index sections
+                    else:
+                        model_val = section_df.loc[element_id, cp.attribute]
+                    """
+                    # Apply physical constraints
+                    new_val = cp.truncate(new_val)
+
+                    # Add update to simulation preconfig
+                    spc.add_update_by_token(
+                        section=cp.section,
+                        obj_id=element_id,
+                        index=cp.col_index,
+                        new_val=new_val,
+                        row_num=cp.row_index
+                    )
+
+            # Handle distributed parameters
+            else:
+                # Calculate new value (relative or absolute)
+                if cp.relative:
+                    new_val = cp.initial_value * (1 + val)
+                else:
+                    new_val = val
+
+                # Apply physical constraints
+                new_val = cp.truncate(new_val)
+
+                # Add update to simulation preconfig
+                spc.add_update_by_token(
+                    section=cp.section,
+                    obj_id=cp.element,
+                    index=cp.col_index,
+                    new_val=new_val,
+                    row_num=cp.row_index
+                )
+
+
+        return spc
+        
 def _cons_to_df(cons: CalParams) -> pd.DataFrame:
+
     """
     Converts a list of constraints to a DataFrame.
 
@@ -497,21 +597,18 @@ def get_cal_params(routine, model):
     :param model: SWMM model
     :type model: swmmio.Model
     :return: Calibration constraints
-    :rtype: CalParam
+    :rtype: CalParams
     """
     cps = list()
     if routine == "dry":
         cps.append(CalParam(section='dwf', attribute='AverageValue', lower=1, upper=1, lower_limit=0.0, upper_limit=10**6, distributed=True))
         cps.append(CalParam(section='inflows', attribute='Baseline', lower=1, upper=1, lower_limit=0.0, upper_limit=10**6, distributed=True))
         cps.append(CalParam(section='xsections', attribute='Geom1', lower=1, upper=1, lower_limit=0.01, upper_limit=10, distributed=True))
-        #cps.append(CalParam(section='conduits', attribute='Length', lower=1, upper=10, lower_limit=0.01, upper_limit=100, distributed=True))
-        #cps.append(CalParam(section='conduits', attribute='Roughness', lower=1, upper=5, lower_limit=1e-6, upper_limit=10, distributed=True))
         cps.append(CalParam(section='conduits', attribute='MaxFlow', lower=1, upper=2, lower_limit=0, upper_limit=10, distributed=True))
 
     if routine == "wet":
         cps.append(CalParam(section='infiltration', attribute='CurveNum', lower=1, upper=1, lower_limit=0, upper_limit=100, distributed=True))
         cps.append(CalParam(section='subcatchments', attribute='Width', lower=0.5, upper=0.5, lower_limit=0.1, upper_limit=10**6, distributed=True))
-        #cps.append(CalParam(section='subcatchments', attribute='PercSlope', lower=1, upper=1, lower_limit=0, upper_limit=100, distributed=True))
         cps.append(CalParam(section='subcatchments', attribute='Area', lower=1, upper=0, lower_limit=0, upper_limit=1E6, distributed=True))
 
     if routine == "tss":
@@ -524,19 +621,12 @@ def get_cal_params(routine, model):
         cps.append(CalParam(section='washoff', attribute='Coeff2', lower=-1, upper=2, lower_limit=0, upper_limit=1e2, distributed=False, key=["col_index","Pollutant"]))
 
 
-    cps_distributed = []
-    for cp in cps:
-        cps_distributed += cp.distribute(model)
+    cps_obj = CalParams(cps)
+    cps_distributed = cps_obj.distribute(model)
 
     # update the bounds relative to the initial values of each calibration parameter
-    cps_distributed = [cp.set_relative_bounds(upper=cp.upper, lower=cp.lower) for cp in cps_distributed]
+    cps_distributed = cps_distributed.relative_bounds_to_absolute()
 
-    #if routine == "wet":
-    #    for cp in cps_distributed:
-    #    # remove subcatchments with zero area
-    #        if cp.distributed and cp.section == "subcatchments":
-    #            cps_distributed.remove(cp)
-            
     return cps_distributed
 
 

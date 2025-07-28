@@ -1,7 +1,9 @@
-numpy
 pandas
-matplotlib
-swmm-toolkit
-pyswmm
+numpy
 swmmio
-scikit-learn
+pyswmm
+
+[dev]
+pytest
+black
+flake8

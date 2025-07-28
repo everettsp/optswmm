@@ -399,20 +399,6 @@ def set_simulation_datetime(model: Model, start_time=None, end_time=None) -> Mod
     return model
 
 
-def fix_model_strings(model):
-    """
-    Fix blank timeseries bug in swmmio.
-
-    :param model: Model to be fixed.
-    :type model: swmmio.Model object
-    :returns: Fixed model.
-    :rtype: swmmio.Model object
-    """
-    for name, row in model.inp.dwf.iterrows():
-        timepatterns = model.inp.dwf.loc[name,'TimePatterns'].split(' ')
-        model.inp.dwf.loc[name,'TimePatterns'] = ("".join(['"{}"'.format(x) for x in timepatterns]))
-    model.inp.inflows['Time Series'] = '""'
-    return model
 
 
 def get_scaler(obs: pd.DataFrame):
@@ -465,80 +451,6 @@ def copy_temp_file(filename:Path, tag="TEMP_FILE"):
     cal_model_tmp = Path(tmp2)
     return cal_model_tmp
 
-def setup_simulation_preconfig(cal_params, values, opt_config):
-    """
-    Set up SimulationPreConfig with parameter updates.
-    
-    :param cal_params: List of calibration parameters.
-    :type cal_params: list[CalParam]
-    :param values: Parameter values from optimization.
-    :type values: list[float]
-    :param opt_config: Optimization configuration.
-    :type opt_config: OptConfig
-    :returns: Configured SimulationPreConfig object
-    :rtype: SimulationPreConfig
-    """
-    spc = SimulationPreConfig()
-    
-
-    for cp, val in zip(cal_params, values):
-        # Handle non-distributed parameters
-        if not cp.distributed:
-            if not cp.relative:
-                raise NotImplementedError("Non-distributed calibration params must be set to 'relative'")
-            
-            # Get the section dataframe and element IDs
-            section_df = getattr(opt_config.model.inp, cp.section)
-            element_ids = section_df.index.unique()
-
-            for element_id in element_ids:
-                # Handle multi-index sections (e.g., hydrographs, LIDs, etc.)
-                if len(section_df.index.unique()) != len(section_df):
-                    subsec = section_df.loc[[element_id], :]
-                    model_val = subsec.iloc[cp.row_index, :][cp.attribute]
-                # Handle single-index sections
-                else:
-                    model_val = section_df.loc[element_id, cp.attribute]
-
-                # Calculate new value with relative change
-                new_val = model_val * (1 + val)
-                
-                # Apply physical constraints
-                new_val = cp.truncate(new_val)
-
-                # Add update to simulation preconfig
-                spc.add_update_by_token(
-                    section=cp.section,
-                    obj_id=element_id,
-                    index=cp.col_index,
-                    new_val=new_val,
-                    row_num=cp.row_index
-                )
-
-        # Handle distributed parameters
-        else:
-            # Calculate new value (relative or absolute)
-            if cp.relative:
-                new_val = cp.initial_value * (1 + val)
-            else:
-                new_val = val
-            
-            # Apply physical constraints
-            new_val = cp.truncate(new_val)
-
-
-            # Add update to simulation preconfig
-            spc.add_update_by_token(
-                section=cp.section,
-                obj_id=cp.element,
-                index=cp.col_index,
-                new_val=new_val,
-                row_num=cp.row_index
-            )
-    
-
-    
-    return spc
 
 
 def de_score_fun(
@@ -570,8 +482,12 @@ def de_score_fun(
     """
     
     # Set up simulation preconfig with parameter updates
-    spc = setup_simulation_preconfig(cal_params, values, opt_config)
-    
+    cal_params.set_values(values)
+    spc = cal_params.make_simulation_preconfig(model=opt_config.model)
+
+    # Fix model strings to avoid blank timeseries bug
+    #fix_model_strings(in_model)
+
     # Run simulation with updated parameters
     outputfile = str(Path(in_model).with_suffix('.out').resolve())
     
@@ -584,14 +500,14 @@ def de_score_fun(
     iter = counter.get_count()
 
     # Log results to files
-    _log_results(score_df, cp, iter, opt_config, timeseries_results)
+    _log_results(score_df, cal_params, iter, opt_config, timeseries_results)
     
     counter.increment()
 
     return score_df[opt_config.score_function].mean()
 
 
-def _log_results(score_df, cp, iter, opt_config, timeseries_results):
+def _log_results(score_df, cal_params, iter, opt_config, timeseries_results):
     """
     Log optimization results to files.
     
@@ -622,9 +538,9 @@ def _log_results(score_df, cp, iter, opt_config, timeseries_results):
 
     # Log parameters if needed
     if np.mod(iter, opt_config.log_every_n) == 0:
-        for ii, _ in enumerate(cp):
+        for ii, _ in enumerate(cal_params):
             now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-            line = f"{now},{iter},{cp[ii].ii},{cp[ii].initial_value},{cp[ii].opt_val},{cp[ii].opt_val_absolute}\n"
+            line = f"{now},{iter},{cal_params[ii].ii},{cal_params[ii].initial_value},{cal_params[ii].opt_value},{cal_params[ii].opt_value_absolute}\n"
             with open(opt_config.results_file_params, 'a+') as f:
                 f.write(line)
 

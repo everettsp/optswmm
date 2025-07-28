@@ -1,4 +1,15 @@
 """
+OptSWMM - SWMM optimization and calibration utilities
+"""
+
+__version__ = "0.1.0"
+__author__ = "Everett"
+
+from .utils.calparams import CalParam, CalParams
+
+__all__ = ["CalParam", "CalParams"]
+
+"""
 optswmm
 =======
 
@@ -7,8 +18,6 @@ Simple package for optimizing SWMM parameters.
 This package provides tools for calibrating SWMM models through various
 optimization techniques.
 """
-
-from optswmm.__about__ import __version__
 
 # Import key modules and functions to make them available at package level
 try:
@@ -40,10 +49,8 @@ except ImportError:
     from .utils.runutils import summarize_runs, initialize_run
 
 # Define what gets imported with "from optswmm import *"
-__all__ = [
+__all__ += [
     'calibrate',
-    'CalParam',
-    'CalParams',
     'OptConfig',
     'get_cal_params',
     'get_node_timeseries',
@@ -54,7 +61,4 @@ __all__ = [
     'run_swmm',
     'summarize_runs',
     'initialize_run',
-    'get_scaler',
-    'normalise',
-    'denormalise'
 ]

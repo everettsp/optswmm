@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optswmm"
+version = "0.1.0"
+description = "SWMM optimization and calibration utilities"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Everett"}
+]
+dependencies = [
+    "pandas",
+    "numpy",
+    "swmmio",
+    "pyswmm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "flake8",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["optswmm*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']

@@ -1,31 +1,38 @@
 from setuptools import setup, find_packages
-import os
 
-# Get directory structure
-package_dir = os.path.abspath(os.path.dirname(__file__))
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
 
 setup(
     name="optswmm",
-    version="0.1.1",
-    packages=find_packages(include=['optswmm', 'optswmm.*']),
-    description="Simple package for optimizing SWMM parameters",
-    author="Everett Snieder",
-    author_email="everett.snieder@gmail.com",
-    url="https://github.com/everettsp/optswmm",
-    install_requires=[
-        "numpy",
-        "pandas",
-        "matplotlib",
-        "swmm-toolkit",
-        "pyswmm",
-        "swmmio",
-        "scikit-learn"
-    ],
+    version="0.1.0",
+    author="Everett",
+    description="SWMM optimization and calibration utilities",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    packages=find_packages(),
     classifiers=[
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Science/Research",
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
-        "Operating System :: OS Independent",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
     ],
-    python_requires=">=3.6",
-    include_package_data=True,
+    python_requires=">=3.8",
+    install_requires=[
+        "pandas",
+        "numpy",
+        "swmmio",
+        "pyswmm",
+        "pathlib",
+    ],
+    extras_require={
+        "dev": [
+            "pytest",
+            "black",
+            "flake8",
+        ],
+    },
 )

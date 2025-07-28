@@ -6,6 +6,7 @@ from optswmm.utils.functions import load_dict
 import plotly.graph_objs as go
 import numpy as np
 import warnings
+from swmmio import Model
 
 from optswmm.defs.filenames import DEFAULT_SCORES_FILENAME, DEFAULT_CAL_PARAMS_FILENAME, DEFAULT_PARAMS_FILENAME, DEFAULT_MODEL_FILENAME
 from optswmm.utils.calparams import CalParams
@@ -242,15 +243,23 @@ class OptRun:
         self.params = params
         return params
 
-    def set_cal_params(self, model:Path, iter=None):
+    def load_simulation_preconfig(self, model:Path|Model, iter=None):
+        """
+        Load simulation preconfiguration for a specified optimization iteration.
+
+        :param model: Path to the SWMM model file.
+        :type model: Path
+        """
         if iter is None:
-            iter = self.params["iter"].max()
+            iter = self.scores.groupby("iter")["score"].mean().argmax().astype(int)
 
         params = self.params[self.params["iter"] == iter].copy()
 
         cal_params_file = self.dir / "calibration_parameters.csv"
         cp = CalParams().from_df(cal_params_file)
 
+        cp.make_simulation_preconfig(model=model)
+        return 
 
     def plot_scores(self, xaxis="iter"):
         """

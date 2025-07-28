@@ -1,5 +1,16 @@
+MANIFEST.in
 README.md
+calibration_params.csv
+generic_logo.png
+main.ipynb
+main.py
+main_assim.ipynb
+main_correction.ipynb
+mapping.ipynb
+pyproject.toml
+results.out
 setup.py
+spam.log
 optswmm/__about__.py
 optswmm/__init__.py
 optswmm.egg-info/PKG-INFO
@@ -10,6 +21,9 @@ optswmm.egg-info/top_level.txt
 optswmm/datasets/__init__.py
 optswmm/datasets/datasets.py
 optswmm/defs/__init__.py
+optswmm/defs/config.yaml
+optswmm/defs/default_OptConfig.yaml
+optswmm/defs/default_plot_args.yml
 optswmm/defs/filenames.py
 optswmm/utils/__init__.py
 optswmm/utils/archive_calibparams.py
