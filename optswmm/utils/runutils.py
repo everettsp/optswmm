@@ -4,9 +4,14 @@ from pathlib import Path
 import pandas as pd
 from optswmm.utils.functions import load_dict
 import plotly.graph_objs as go
+import numpy as np
+import warnings
 
 from optswmm.defs.filenames import DEFAULT_SCORES_FILENAME, DEFAULT_CAL_PARAMS_FILENAME, DEFAULT_PARAMS_FILENAME, DEFAULT_MODEL_FILENAME
+from optswmm.utils.calparams import CalParams
 
+
+XAXIS_CHOICES = ["iter", "datetime"]
 
 def initialize_run(run_loc: Path, name: str):
     """
@@ -77,15 +82,38 @@ def summarize_runs(runs_dir:Path, drop_incomplte=True) -> list[Path]:
         df = df[df["max_iter"] > 0]
     return df
 
+import plotly.express as px
 
 
-def plot_run_minimization(df:Path|str|pd.DataFrame):
+
+def _plot_param_changes(df, xaxis="iter"):
+    
+
+    # Plot all parameter values over time, colored by parameter name
+
+    if xaxis not in XAXIS_CHOICES:
+        raise ValueError(f"xaxis must be one of {XAXIS_CHOICES}")
+
+
+    fig = px.line(
+        df.reset_index(),
+        x=xaxis,
+        y="cal_val",
+        color="param_tag",
+        title="Parameter Physical Values Over Time",
+        labels={"physical_val": "Physical Value", "datetime": "Datetime", "param_tag": "Parameter"}
+    )
+    fig.show()
+
+def _plot_run_minimization(df:pd.DataFrame, xaxis="iter"):
     """
     Plot the minimization scores from a DataFrame or directory of runs.
     :param df: DataFrame containing run scores or path to a directory with run results.
     :type df: Path, str, or pd.DataFrame
     :raises ValueError: If the DataFrame does not contain 'score' and 'iter' columns or is empty.
     """
+    if xaxis not in XAXIS_CHOICES:
+        raise ValueError(f"xaxis must be one of {XAXIS_CHOICES}")
 
     if not all(col in df.columns for col in ["score", "iter"]):
         raise ValueError("DataFrame must contain 'score' and 'iter' columns.")
@@ -93,64 +121,36 @@ def plot_run_minimization(df:Path|str|pd.DataFrame):
     if df.empty:
         raise ValueError("DataFrame is empty. No runs to plot.")
 
-    trace = go.Scatter(
-        x=df["iter"],
-        y=df["score"],
-        mode='lines',
-        name="Run Scores"
-    )
+
     fig = go.Figure()
-    fig.add_trace(trace)
+    if "node" in df.columns:
+        for node in df["node"].unique():
+            node_df = df[df["node"] == node]
+            trace = go.Scatter(
+                x=node_df[xaxis],
+                y=node_df["score"],
+                mode='lines',
+                name=f"Node: {node}"
+            )
+            fig.add_trace(trace)
+    else:
+        trace = go.Scatter(
+            x=df.loc[:,xaxis],
+            y=df.loc[:,"score"],
+            mode='lines',
+            name="Run Scores"
+        )
+        fig.add_trace(trace)
     fig.update_layout(
         title="Run Scores",
-        xaxis_title="Iteration",
+        xaxis_title="Iteration" if xaxis == "iter" else "Datetime",
         yaxis_title="Score",
         yaxis=dict(range=[0, 1]),
-        legend_title="Run"
+        legend_title="Node" if "node" in df.columns else "Run"
     )
     fig.show()
     
 
-def plot_runs_minimization(runs):
-    """
-    Plot the minimization scores from a DataFrame or directory of runs.
-
-    :param df: DataFrame containing run scores or path to a directory with run results.
-    :type df: Path, str, or pd.DataFrame
-    :raises ValueError: If the DataFrame does not contain 'score' and 'iter' columns or is empty.
-    """
-
-    if isinstance(runs, str):
-        runs = Path(runs)
-
-    if isinstance(runs, Path):
-        if runs.is_dir():
-            runs = summarize_runs(runs)
-        else:
-            raise ValueError("Path must be a directory containing folders with individual runs.")
-
-    if not all(col in runs.columns for col in ["score", "iter"]):
-        raise ValueError("DataFrame must contain 'score' and 'iter' columns.")
-
-    if runs.empty:
-        raise ValueError("DataFrame is empty. No runs to plot.")
-
-    for run_dir in runs.index:
-        scores_file = run_dir / DEFAULT_SCORES_FILENAME
-        scores_df = pd.read_csv(scores_file, sep=",", header=0, index_col=0).rename(columns=lambda x: x.strip())
-        trace = go.Scatter(x=scores_df["iter"], y=scores_df["score"], mode='lines', name=run_dir.name)
-        if 'fig' not in locals():
-            fig = go.Figure()
-        fig.add_trace(trace)
-
-    fig.update_layout(
-        title="Run Scores",
-        xaxis_title="Iteration",
-        yaxis_title="Score",
-        yaxis=dict(range=[0, 1]),
-        legend_title="Run"
-    )
-    fig.show()
 
 # Example usage:
 # plot_run_scores(scores_df)
@@ -160,47 +160,114 @@ class OptRun:
     """
 
     def __init__(self, run_loc: Path):
-        self.run_dir = run_loc
+        self.dir = run_loc
         self.name = run_loc.name
         try:
             self.date = datetime.strptime(self.name.split("_")[1], "%d-%m-%y-%H%M%S")
         except Exception:
             self.date = None
-        self.scores = self.get_scores()
-        self.params = None
+        
+
+        self.get_scores()
+        self.get_params()
+
+    def get_timeseries(self, ii=None):
+        """
+        Find all files matching the pattern 'obs_{ii}.csv' in the timeseries directory.
+        If ii is None, return all matching files. Otherwise, return the file for the given ii.
+        """
+        timeseries_dir = self.dir / "timeseries"
+
+        iters_available = list(timeseries_dir.glob("sim_*.pkl"))
+        iters_available = [jj.stem.split("_")[1] for jj in iters_available]
+
+        iters_available = np.sort(np.array(iters_available, dtype=int))
+
+        if ii is None:
+            ii = iters_available[-1]  # Get the last iteration by default
+
+        if ii not in iters_available:
+            # Find the nearest available iteration
+
+            ii_nearest = iters_available[np.searchsorted(iters_available, ii) - 1]
+            warnings.warn(f"Iteration {ii} not found, using nearest available iteration {ii_nearest}.")
+            ii = ii_nearest
+
+        obs = pd.read_pickle(timeseries_dir / f"obs_{ii}.pkl")
+        sim = pd.read_pickle(timeseries_dir / f"sim_{ii}.pkl")
+        return obs, sim
+    
 
     def get_scores(self):
         """
         Get the scores from the optimization run.
         """
-        scores_file = self.run_dir / "results_scores.txt"
+        scores_file = self.dir / "results_scores.txt"
         if not scores_file.exists():
             raise FileNotFoundError(f"Scores file {scores_file} does not exist.")
-        
-        return pd.read_csv(scores_file, sep=",", header=0, index_col=0).rename(columns=lambda x: x.strip())
+
+        scores = pd.read_csv(scores_file, sep=",", header=0, index_col=0).rename(columns=lambda x: x.strip())
+        self.scores = scores
 
     def get_params(self):
         """
         Get the parameters from the optimization run.
         """
-        params_file = self.run_dir / "results_params.csv"
+        params_file = self.dir / DEFAULT_PARAMS_FILENAME
         if not params_file.exists():
+            self.params = None
             return None
+            
         params = pd.read_csv(params_file)
         if "datetime" in params.columns:
             params.set_index(pd.DatetimeIndex(params["datetime"]), inplace=True)
             params.drop(columns=["datetime"], inplace=True)
-        self.params = params
 
         # load the params metadata to match the param id (ii) to the parameter name
-        param_index = pd.read_csv(self.run_dir / "calibration_parameters.csv", index_col=0)
+        cal_params_file = self.dir / "calibration_parameters.csv"
+        if not cal_params_file.exists():
+            self.params = params
+            return params
+            
+        param_index = pd.read_csv(cal_params_file, index_col=0)
         param_index = param_index.set_index("ii")
-        param_index["param_name"] = [f"{p['section']}_{p['attribute']}" for _, p in param_index.iterrows()]
+        param_index.loc[param_index["element"].isnull(), "element"] = "lumped"
+        param_index["param_tag"] = [f"{p['section']}_{p['attribute']}_{p['element']}" for _, p in param_index.iterrows()]
 
-        self.params["param_name"] = self.params["ii"].map(param_index["param_name"])
+        params["param_tag"] = params["ii"].map(param_index["param_tag"])
+        params["element"] = params["ii"].map(param_index["element"])
+        params["section"] = params["ii"].map(param_index["section"])
+        params["attribute"] = params["ii"].map(param_index["attribute"])
 
+        self.params = params
         return params
 
+    def set_cal_params(self, model:Path, iter=None):
+        if iter is None:
+            iter = self.params["iter"].max()
+
+        params = self.params[self.params["iter"] == iter].copy()
+
+        cal_params_file = self.dir / "calibration_parameters.csv"
+        cp = CalParams().from_df(cal_params_file)
+
+
+    def plot_scores(self, xaxis="iter"):
+        """
+        Plot the scores of the optimization run.
+        :param xaxis: The x-axis to use for the plot. Options are 'iter' or 'datetime'.
+        :type xaxis: str
+        """
+
+        _plot_run_minimization(self.scores, xaxis=xaxis)
+
+    def plot_param_changes(self, xaxis="iter"):
+        """
+        Plot the parameter minimization results.
+        :param xaxis: The x-axis to use for the plot. Options are 'iter' or 'datetime'.
+        :type xaxis: str
+        """
+        _plot_param_changes(self.params, xaxis=xaxis)
 
 class OptRuns:
     """
@@ -253,4 +320,34 @@ class OptRuns:
                     name=run.name
                 )
                 fig.add_trace(trace)
+
+
+    def plot_runs_minimization(self):
+        """
+        Plot the minimization scores from a DataFrame or directory of runs.
+
+        :param df: DataFrame containing run scores or path to a directory with run results.
+        :type df: Path, str, or pd.DataFrame
+        :raises ValueError: If the DataFrame does not contain 'score' and 'iter' columns or is empty.
+        """
+        runs_df = self.get_df()
+        if not all(col in runs_df.columns for col in ["score", "iter"]):
+            raise ValueError("DataFrame must contain 'score' and 'iter' columns.")
+
+        for run_dir in runs_df.index:
+            scores_file = run_dir / DEFAULT_SCORES_FILENAME
+            scores_df = pd.read_csv(scores_file, sep=",", header=0, index_col=0).rename(columns=lambda x: x.strip())
+            trace = go.Scatter(x=scores_df["iter"], y=scores_df["score"], mode='lines', name=run_dir.name)
+            if 'fig' not in locals():
+                fig = go.Figure()
+            fig.add_trace(trace)
+
+        fig.update_layout(
+            title="Run Scores",
+            xaxis_title="Iteration",
+            yaxis_title="Score",
+            yaxis=dict(range=[0, 1]),
+            legend_title="Run"
+        )
+        fig.show()
 

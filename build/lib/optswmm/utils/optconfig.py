@@ -1,6 +1,7 @@
 """Class to handle the configuration file for the optimization process"""
 
 import yaml
+from typing import Optional
 from pathlib import Path
 import warnings
 import pandas as pd
@@ -12,35 +13,37 @@ from optswmm.defs import ALGORITHMS
 from optswmm.utils.standardization import _standardize_file, _validate_target_data
 from optswmm.utils.runutils import initialize_run
 from optswmm.utils.swmmutils import set_model_datetimes
+from optswmm.defs.filenames import DEFAULT_SCORES_FILENAME, DEFAULT_CAL_PARAMS_FILENAME, DEFAULT_PARAMS_FILENAME, DEFAULT_MODEL_FILENAME
+
 
 class OptConfig:
     """Class to handle the configuration file for the optimization process"""
     def __init__(
             self,
-            name:str=None,
-            config_file:Path=None,
-            model_file:Path=None,
-            forcing_data_file:Path=None,
-            target_data_file:Path=None,
-            run_folder:Path=None,
-            calibration_nodes:list[str]=None,
-            target_variables:list[str]=None,
-            ignore_first_n:int=0,
-            normalize:bool=True,
-            score_function:str="mse",
-            algorithm:str="differential-evolution",
-            parallel:bool=False,
-            hierarchial:bool=False,
-            log_every_n:int=10,
-            algorithm_options:dict=None,
-            save_timeseries:bool=False,
-            calibration_start_date:str=None,
-            calibration_end_date:str=None,
-            validation_start_date:str=None,
-            validation_end_date:str=None,
-            report_step:pd.Timestamp=None,
-            dry_step:pd.Timestamp=None,
-            wet_step:pd.Timestamp=None,
+            name: str = '',
+            config_file: Optional[Path] = None,
+            model_file: Optional[Path] = None,
+            forcing_data_file: Optional[Path] = None,
+            target_data_file: Optional[Path] = None,
+            run_folder: Optional[Path] = None,
+            calibration_nodes: Optional[list[str]] = None,
+            target_variables: Optional[list[str]] = None,
+            ignore_first_n: int = 0,
+            normalize: bool = True,
+            score_function: str = "mse",
+            algorithm: str = "differential-evolution",
+            parallel: bool = False,
+            hierarchial: bool = False,
+            log_every_n: int = 10,
+            algorithm_options: Optional[dict] = None,
+            save_timeseries: bool = False,
+            calibration_start_date: Optional[str] = None,
+            calibration_end_date: Optional[str] = None,
+            validation_start_date: Optional[str] = None,
+            validation_end_date: Optional[str] = None,
+            report_step: Optional[pd.Timestamp] = None,
+            dry_step: Optional[pd.Timestamp] = None,
+            wet_step: Optional[pd.Timestamp] = None,
             ):
         
         """initialize the configuration file"""
@@ -54,7 +57,7 @@ class OptConfig:
         self.forcing_data_file = forcing_data_file
         self.target_data_file = target_data_file
         self.run_folder = run_folder
-        self.run_dir = None
+        self.run_dir = Path()
         self.calibration_nodes = calibration_nodes
         self.target_variables = target_variables
         self.ignore_first_n = ignore_first_n
@@ -92,15 +95,16 @@ class OptConfig:
         self._validate_target_data()
         self._assign_default_opt_options()
         
-
+        if self.run_folder is None:
+            raise ValueError("Run folder must be specified")
 
         if not self.run_folder.exists():
             self.run_folder.mkdir()
 
         self.run_dir = initialize_run(self.run_folder, self.name)
-        self.results_file_params = self.run_dir / 'results_params.txt'
-        self.results_file_scores = self.run_dir / 'results_scores.txt'
-        self.calibrated_model_file = self.run_dir / 'calibrated_model.inp'
+        self.results_file_params = self.run_dir / DEFAULT_PARAMS_FILENAME
+        self.results_file_scores = self.run_dir / DEFAULT_SCORES_FILENAME
+        self.calibrated_model_file = self.run_dir / DEFAULT_MODEL_FILENAME
 
 
         if not self.results_file_scores.exists():
@@ -109,7 +113,7 @@ class OptConfig:
         
         if not self.results_file_params.exists():
             with open(self.results_file_params, 'a+') as f:
-                f.write('datetime,iter,ii,cal_val,physical_val\n')
+                f.write('datetime,iter,ii,model_val,cal_val,physical_val\n')
             
     def load_config(self, config_file):
         """load the configuration file"""
@@ -132,19 +136,24 @@ class OptConfig:
             raise ValueError(f"Cannot find default optimization options for algorithm {self.algorithm}")
         
     def _standardize_config(self):
+        if self.model_file is None:
+            raise ValueError("Model file must be specified")
+        
         if not self.model_file.exists():
             raise FileNotFoundError(f"Model file {self.model_file} does not exist.")
+        
         if self.model_file.suffix != ".inp":
             raise ValueError(f"Model file must have extension .inp, got {self.model_file.suffix}")
 
         for file in [self.forcing_data_file, self.target_data_file]:
+            if file is None:
+                raise ValueError("Forcing data file and target data file must be specified")
+            
             if not file.exists():
-                raise FileNotFoundError(f"Forcing data file {self.forcing_data_file} does not exist.")
+                raise FileNotFoundError(f"Forcing data file {file} does not exist.")
+            
             if file.suffix not in [".pkl", ".csv"]:
-                raise ValueError(f"Forcing data file must have extension .pkl or .csv, got {self.forcing_data_file.suffix}")
-
-        # Ensure run_folder does not already exist
-        self.run_folder.mkdir(parents=True, exist_ok=True)
+                raise ValueError(f"Forcing data file must have extension .pkl or .csv, got {file.suffix}")
 
         #if not Path(self.run_dir).exists():
         #    Path(self.run_dir).mkdir()

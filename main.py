@@ -73,7 +73,7 @@ for station_id in tqdm(station_ids):
         algorithm = "Powell",
         algorithm_options={"maxiter":5, "ftol":0.01},
         score_function=["nse"],
-        name="debug", # no underscores
+        name="debug2", # no underscores
         target_variables=["discharge(cms)"],
         save_timeseries=True,
         calibration_start_date = training_start_date,

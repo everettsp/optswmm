@@ -10,6 +10,7 @@ optswmm.egg-info/top_level.txt
 optswmm/datasets/__init__.py
 optswmm/datasets/datasets.py
 optswmm/defs/__init__.py
+optswmm/defs/filenames.py
 optswmm/utils/__init__.py
 optswmm/utils/archive_calibparams.py
 optswmm/utils/calibutils.py

@@ -6,7 +6,7 @@ package_dir = os.path.abspath(os.path.dirname(__file__))
 
 setup(
     name="optswmm",
-    version="0.1.0",
+    version="0.1.1",
     packages=find_packages(include=['optswmm', 'optswmm.*']),
     description="Simple package for optimizing SWMM parameters",
     author="Everett Snieder",

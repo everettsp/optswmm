@@ -1,57 +1,77 @@
 """Main calibration routine for SWMM models."""
 
+# Standard library imports
+import logging
 import os
+import sys
 import time
 import uuid
 import shutil
 import pickle
+import warnings
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 import contextlib
+from multiprocessing import freeze_support
+
+# Third-party imports
 import numpy as np
 import pandas as pd
 import networkx as nx
-import pyswmm.simulation
 import yaml
-import swmmio
-from swmmio import Model
-from pyswmm import Simulation, Output, Nodes, Links, Subcatchments, SimulationPreConfig
-from swmm.toolkit import shared_enum
-
-
-from swmm.toolkit.shared_enum import SubcatchAttribute, NodeAttribute, LinkAttribute
 from scipy.optimize import differential_evolution, minimize
 from tqdm import tqdm
-from optswmm.utils.swmmutils import get_node_timeseries
-#from utils import performance as pf
-from optswmm.utils import perfutils as pf
 
+# SWMM-related imports
+import swmmio
+from swmmio import Model
+import pyswmm.simulation
+from pyswmm import Simulation, Output, Nodes, Links, Subcatchments, SimulationPreConfig
+from swmm.toolkit import shared_enum
+from swmm.toolkit.shared_enum import SubcatchAttribute, NodeAttribute, LinkAttribute
 
-from optswmm.utils.functions import sync_timeseries, invert_dict, load_dict
-from optswmm.utils.networkutils import get_upstream_nodes, get_downstream_nodes
-from optswmm.utils.swmmutils import get_model_path, run_swmm, dataframe_to_dat, get_predictions_at_nodes
-from optswmm.utils.calparams import CalParam, get_cal_params, get_calibration_order
-from optswmm.utils.standardization import load_timeseries
-
-from multiprocessing import freeze_support
-
-import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
+# Plotting
 import matplotlib.pyplot as plt
 
-# these functions get their sign flipped in the optimization routine
+# Local imports
+from optswmm.utils.swmmutils import get_node_timeseries, get_model_path, run_swmm, dataframe_to_dat, get_predictions_at_nodes
+from optswmm.utils import perfutils as pf
+from optswmm.utils.functions import sync_timeseries, invert_dict, load_dict
+from optswmm.utils.networkutils import get_upstream_nodes, get_downstream_nodes
+from optswmm.utils.calparams import CalParam, get_cal_params, get_calibration_order
+from optswmm.utils.standardization import load_timeseries
+from optswmm.utils.optconfig import OptConfig
+from optswmm.defs import ROW_ATTRIBUTES, ROW_INDICES, PARAM_INDICES, SWMM_SECTION_SUBTYPES
+
+# Configure warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# Constants
 MAXIMIZE_FUNCTIONS = ["nse", "kge", "rsr", "rsq", "pearsonr", "spearmanr"]
 
-
-# Load conceptual SWMM model
+# Load conceptual SWMM model (consider moving this to a configuration or function)
 model_dir = Path('dat/winnipeg1')
 inp_file = Path(os.path.join(model_dir, 'conceptual_model1.inp'))
 
 # Load IW-SWMM node ID mapping
 # Comparison nodes comprised of SWMM junctions and outfalls
-from optswmm.utils.optconfig import OptConfig
+
+
+class OptCount():
+    """
+    Class container for processing stuff
+    """
+    _count = 0
+    def increment(self):
+        """Increment the counter"""
+        # Some code here ...
+        self._count += 1
+
+    def get_count(self):
+        """Return the counter"""
+        return self._count
+    
 
 def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     """
@@ -63,8 +83,8 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     """
 
     #load the optimization configuration
-    if isinstance(opt_config, (str, Path)):
-        opt = OptConfig(opt_config)
+    if isinstance(opt_config, Path):
+        opt = OptConfig(config_file=opt_config)
     elif isinstance(opt_config, OptConfig):
         opt = opt_config
     else:
@@ -73,7 +93,7 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     
     opt._standardize_config()
     opt._initialize_run()
-    cal_params.to_dataframe().to_csv(opt.run_dir / "calibration_parameters.csv", index=True)
+    cal_params.to_df().to_csv(opt.run_dir / "calibration_parameters.csv", index=True)
     opt.save_config()
     # Load calibration data
     
@@ -207,11 +227,6 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     """
     print("\nSaving calibration...", end=" ")
     print("done.")
-
-
-import logging
-import sys
-from shutil import copytree
 
 
 def initialize_logger():
@@ -450,14 +465,89 @@ def copy_temp_file(filename:Path, tag="TEMP_FILE"):
     cal_model_tmp = Path(tmp2)
     return cal_model_tmp
 
+def setup_simulation_preconfig(cal_params, values, opt_config):
+    """
+    Set up SimulationPreConfig with parameter updates.
+    
+    :param cal_params: List of calibration parameters.
+    :type cal_params: list[CalParam]
+    :param values: Parameter values from optimization.
+    :type values: list[float]
+    :param opt_config: Optimization configuration.
+    :type opt_config: OptConfig
+    :returns: Configured SimulationPreConfig object
+    :rtype: SimulationPreConfig
+    """
+    spc = SimulationPreConfig()
+    
+
+    for cp, val in zip(cal_params, values):
+        # Handle non-distributed parameters
+        if not cp.distributed:
+            if not cp.relative:
+                raise NotImplementedError("Non-distributed calibration params must be set to 'relative'")
+            
+            # Get the section dataframe and element IDs
+            section_df = getattr(opt_config.model.inp, cp.section)
+            element_ids = section_df.index.unique()
+
+            for element_id in element_ids:
+                # Handle multi-index sections (e.g., hydrographs, LIDs, etc.)
+                if len(section_df.index.unique()) != len(section_df):
+                    subsec = section_df.loc[[element_id], :]
+                    model_val = subsec.iloc[cp.row_index, :][cp.attribute]
+                # Handle single-index sections
+                else:
+                    model_val = section_df.loc[element_id, cp.attribute]
+
+                # Calculate new value with relative change
+                new_val = model_val * (1 + val)
+                
+                # Apply physical constraints
+                new_val = cp.truncate(new_val)
+
+                # Add update to simulation preconfig
+                spc.add_update_by_token(
+                    section=cp.section,
+                    obj_id=element_id,
+                    index=cp.col_index,
+                    new_val=new_val,
+                    row_num=cp.row_index
+                )
+
+        # Handle distributed parameters
+        else:
+            # Calculate new value (relative or absolute)
+            if cp.relative:
+                new_val = cp.initial_value * (1 + val)
+            else:
+                new_val = val
+            
+            # Apply physical constraints
+            new_val = cp.truncate(new_val)
+
+
+            # Add update to simulation preconfig
+            spc.add_update_by_token(
+                section=cp.section,
+                obj_id=cp.element,
+                index=cp.col_index,
+                new_val=new_val,
+                row_num=cp.row_index
+            )
+    
+
+    
+    return spc
+
+
 def de_score_fun(
         values,
         in_model,
         cal_params,
         cal_targets,
-        eval_nodes:list[str]=None,
-        counter=0,
-        opt_config=None):
+        counter,
+        opt_config):
     """
     Optimization score function.
 
@@ -465,154 +555,80 @@ def de_score_fun(
     :type values: list of floats
     :param in_model: Initial model.
     :type in_model: swmmio.Model object
-    :param cal_model: Model to be calibrated.
-    :type cal_model: swmmio.Model object
-    :param constraints: Parameter constraints.
-    :type constraints: Constraints object
+    :param cal_params: Calibration parameters.
+    :type cal_params: list[CalParam]
     :param cal_targets: Calibration targets.
-    :type cal_targets: dict
-
-    :param warmup_len: Number of warmup timesteps, defaults to 48.
-    :type warmup_len: int, optional
+    :type cal_targets: pd.DataFrame
     :param eval_nodes: Nodes to evaluate.
     :type eval_nodes: list of str
     :param counter: Optimization counter.
-    :type counter: int
-    :param log_every_n: Log results every n iterations.
-    :type log_every_n: int
-    :param target_weights: Weights for calibration targets.
-    :type target_weights: dict
+    :type counter: OptCount
+    :param opt_config: Optimization configuration.
+    :type opt_config: OptConfig
     :returns: Optimization score.
     :rtype: float
     """
-    # print("DEBUGa")
     
-
-    # Retrieve the *base* model
-
-    # update model with current parameters 
-    # during the optimization algorithm:
+    # Set up simulation preconfig with parameter updates
+    spc = setup_simulation_preconfig(cal_params, values, opt_config)
     
-    
-    # NOTE: MODIFY MODEL PARAMS HERE
-
-    #model, changes = set_params(cal_vals=values, cal_params=cal_params, model=in_model)
-    
-    
-
-    spc = SimulationPreConfig()
-    #cal_params_list = ["section, element, index, new_val \n"]
-    new_vals = []
-
-    for cp, val in zip(cal_params, values):
-
-
-
-        #if cp.relative:
-        #    val = cp.initial_value * (1 + val)
-
-        # apply physical constraints
-        #if val < cp.lower_limit:
-        #    val = cp.lower_limit
-        #if val > cp.upper_limit:
-        #    val = cp.upper_limit
-
-
-
-    # if it's not a distributed parameter, get all element ids and apply the new value everywhere
-        if not cp.distributed:
-            with Simulation(in_model) as sim:
-                if not cp.relative:
-                    raise NotImplementedError("Non-distributed calibration params must be set to 'relative'")
-                
-                # the calibrated value 'val' is the relative change - so we need to calculate the new model values relative to the initial values
-                val_map = getattr(opt_config.model.inp, cp.section).loc[:,cp.attribute].to_dict()
-                for element_id, model_val in val_map.items():
-                    new_val = model_val * (1 + val)
-                    new_val = cp.truncate(new_val)
-
-
-                    spc.add_update_by_token(
-                        section=cp.section,
-                        obj_id=element_id,
-                        index=cp.col_index,
-                        new_val=new_val,
-                        row_num=cp.row_index
-                    )
-                    new_vals.append(new_val)
-                    #print(f"""Updating {cp.section} {element_id} {cp.attribute} to {new_val} (relative change of {val})""")
-
-        # if it's a distributed calibration parameter
-        else:
-            # if the calibrated value 'val' is the relative change - so we need to calculate the new model values relative to the initial values
-            if cp.relative:
-                new_val = cp.initial_value * (1 + val)
-            # otherwise, the value can be set directly
-            else:
-                new_val = val
-                
-            new_val = cp.truncate(new_val)
-
-            new_vals.append(new_val)
-            spc.add_update_by_token(section=cp.section, obj_id=cp.element, index=cp.col_index, new_val=new_val, row_num=cp.row_index)
-
+    # Run simulation with updated parameters
     outputfile = str(Path(in_model).with_suffix('.out').resolve())
-
+    
     with Simulation(str(in_model), outputfile=outputfile, sim_preconfig=spc) as sim:
         sim.execute()   
 
-    #Model(cal_model_tmp).inp.save()
-
-    #out = Output(str(Path(cal_model).with_suffix(".out"))).node_series('HY035', 'Depth')
-    #os.remove(str(cal_model_tmp))
-
-
+    # Evaluate model performance
     score_df, timeseries_results = eval_model(outputfile=outputfile, cal_targets=cal_targets, opt_config=opt_config)
-    # weighted sum of multi-objective scores, mean across eval nodes
-    # default uniform weights
-
-    # re-invert the score of the NSE outside the minimize function
-    #if opt_config["score_function"].lower() == "nse":
-    #    score_df = score_df.apply(lambda x: -x)
-
-    #if isinstance(cal_targets, list):
-    #    target_weights = np.array([1 for _ in opt_config["target_variables"]])
-    #elif isinstance(cal_targets, dict):
-    #    target_weights = np.array([opt_config["target_variables"][key] for key in opt_config["target_variables"]])
-
-    #if len(cal_targets) != len(target_weights):
-    #    raise ValueError("target_weights must have the same length as cal_targets")
-
-    # convex combination of scores
-    #target_weights = target_weights / np.sum(target_weights)
-    #target_weights = target_weights.reshape(1,-1)
-    #score = np.matmul(target_weights,score_df.loc[list(opt_config["target_variables"].keys()),:].to_numpy()).mean()
-
+    
     iter = counter.get_count()
 
+    # Log results to files
+    _log_results(score_df, cp, iter, opt_config, timeseries_results)
     
-    # make a copy of the score df for writing to the results file
+    counter.increment()
+
+    return score_df[opt_config.score_function].mean()
+
+
+def _log_results(score_df, cp, iter, opt_config, timeseries_results):
+    """
+    Log optimization results to files.
+    
+    :param score_df: Score dataframe.
+    :type score_df: pd.DataFrame
+    :param iter: Current iteration.
+    :type iter: int
+    :param opt_config: Optimization configuration.
+    :type opt_config: OptConfig
+    :param timeseries_results: Timeseries results.
+    :type timeseries_results: dict
+    """
+    # Make a copy of the score df for writing to the results file
     score_df_copy = score_df.copy()
-    # if NSE, flip the sign back (we flipped it in eval_model since we can only minimize)
+    # If NSE, flip the sign back (we flipped it in eval_model since we can only minimize)
     for col in score_df_copy.columns:
         if col in MAXIMIZE_FUNCTIONS:
             score_df_copy[col] = score_df_copy[col].apply(lambda x: -x)
 
     mi = score_df_copy.index.to_list()
 
+    # Log scores
     for m in mi:
         now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
         line = f"{now},{iter},{m[0]},{m[1]},{opt_config.score_function[0]},{score_df_copy.loc[m, opt_config.score_function[0]]}\n"
         with open(opt_config.results_file_scores, 'a+') as f:
             f.write(line)
 
-    if np.mod(iter,opt_config.log_every_n) == 0:        
-        for ii, cp in enumerate(cal_params):
+    # Log parameters if needed
+    if np.mod(iter, opt_config.log_every_n) == 0:
+        for ii, _ in enumerate(cp):
             now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-            line = f"{now},{iter},{cp.ii},{values[ii]},{new_vals[ii]}\n"
+            line = f"{now},{iter},{cp[ii].ii},{cp[ii].initial_value},{cp[ii].opt_val},{cp[ii].opt_val_absolute}\n"
             with open(opt_config.results_file_params, 'a+') as f:
                 f.write(line)
 
+        # Save timeseries if requested
         if opt_config.save_timeseries:
             if not (opt_config.run_dir / "timeseries").exists():
                 os.mkdir(opt_config.run_dir / "timeseries")
@@ -620,15 +636,7 @@ def de_score_fun(
             for ts in timeseries_results.keys():
                 filename = opt_config.run_dir / "timeseries" / f"{ts}_{iter}.pkl"
                 timeseries_results[ts].to_pickle(filename)
-        
-        #if opt_config.save_models:
-        #    if not (opt_config.run_dir / "models").exists():
-        #        os.mkdir(opt_config.run_dir / "models")
-        #    shutil.copyfile(str(in_model), str(opt_config.run_dir / "models" / f"{iter}_model.inp"))
-
     
-    counter.increment()
-
     # Clean up, we will not need this model any more
 
     #fname_root = str(cal_model_tmp).split(".")[0]
@@ -764,7 +772,7 @@ def de_calibration(in_model,
                    cal_targets,
                    cal_params, 
                    opt_config,
-                   counter=None):
+                   counter:OptCount):
     """
     Subroutine for SWMM optimization
     
@@ -833,19 +841,6 @@ def de_calibration(in_model,
     
     return True
 
-class OptCount():
-    """
-    Class container for processing stuff
-    """
-    _count = 0
-    def increment(self):
-        """Increment the counter"""
-        # Some code here ...
-        self._count += 1
-
-    def get_count(self):
-        """Return the counter"""
-        return self._count
 
 """
 def get_calibration_order(model, constraints) -> list[str]:

@@ -10,89 +10,11 @@ from warnings import warn as warning
 
 from pyswmm import Simulation, SimulationPreConfig, Subcatchments, Nodes, Links
 
-from optswmm.defs import SWMM_SECTION_SUBTYPES
+from optswmm.defs import SWMM_SECTION_SUBTYPES, ROW_ATTRIBUTES, ROW_INDICES, PARAM_INDICES
 from optswmm.utils.networkutils import get_upstream_nodes
 
 
-PARAM_INDICES = {
-    "subcatchments": {
-        "RainGage": 1,
-        "Outlet": 2,
-        "Area": 3,
-        "Width": 4,
-        "PercImperv": 5,
-        "Slope": 6,
-        "CurbLength": 7,
-        "SnowPack": 8
-    },
-    "subareas": {
-        "N-Imperv": 1,
-        "N-Perv": 2,
-        "S-Imperv": 3,
-        "S-Perv": 4,
-        "PctZero": 5,
-        "RouteTo": 6
-    },
-    "infiltration": {
-        "Param1": 1,
-        "Param2": 2,
-        "Param3": 3,
 
-        "Param4": 4,
-        "Param5": 5,
-        "CurveNum": 1,
-    },
-    "junctions": {
-        "Elevation": 1,
-        "MaxDepth": 2,
-        "InitDepth": 3,
-        "SurDepth": 4,
-        "Aponded": 5
-    },
-    "conduits":{
-        "FromNode":1,
-        "ToNode":2,
-        "Length":3,
-        "Roughness":4,
-        "InOffset":5,
-        "OutOffset":6,
-        "InitFlow":7,
-        "MaxFlow":8,
-    },
-    "xsections":{
-        "Shape":1,
-        "Geom1":2,
-        "Geom2":3,
-    },
-    "inflows":{
-        "Mfactor":4,
-        "Sfactor":5,
-        "Baseline":6,
-        "Pattern":7,
-    },
-    "dwf":{
-        "AverageValue": 2,
-    },
-    "hydrographs":{
-        "Response":2,
-        "R":3,
-        "T":4,
-        "K":5,
-        "Dmax":6,
-        "Drecov":7,
-        "Dinit":8,
-    },
-    "rdii":{
-        "SewerArea": 2,
-    },
-}
-
-ROW_INDICES = {"hydrographs":{
-        "Short": 1,
-        "Medium": 2,
-        "Long": 3
-    }
-}
 
 #DEFAULT_CHANGES = ['relative', 'absolute']
 
@@ -111,7 +33,7 @@ class CalParam():
     def __init__(self,
                  section: str, 
                  attribute: str,
-                 element: str = None,
+                 element: str = '',
                  key:list[str]=["index"], 
                  lower: float = 0.0, 
                  upper: float = np.inf, 
@@ -119,10 +41,15 @@ class CalParam():
                  upper_limit: float = np.inf, 
                  distributed: bool = False,
                  relative: bool = False,
-                 col_index: int = None,
-                 initial_value:float = None,
-                 row_attribute: str = None,
+                 relative_bounds: bool = True,
+                 col_index: int|None = None,
+                 initial_value:float = np.nan,
+                 opt_value:float = np.nan,
+                 opt_value_absolute:float = np.nan,
+                 row_attribute: str = '',
                  row_index: int = 0,
+                 level: int = 0,
+                 ii: int = 0,
                  ):
         
         """
@@ -159,8 +86,9 @@ class CalParam():
         self.upper_limit = upper_limit # upper physical constraint
         self.distributed = distributed # whether to distribute the parameter across all elements
         self.relative = relative # relative change (e.g., 0.5 is +50% the initial value), in contrast to absolute (e.g., +5mm/hr)
+        self.relative_bounds = relative_bounds
         self.initial_value = initial_value
-        self.x0 = None
+        self.x0 = float('nan')
         self.col_index = col_index  # numeric integer used while setting sim preconfig
         self.row_index = row_index
         self.row_attribute = row_attribute # used for hydrographs, e.g., 'Short', 'Medium', 'Long'
@@ -200,9 +128,8 @@ class CalParam():
         
         self.parent_section = SWMM_SECTION_SUBTYPES[self.section]
 
-
         self.col_index = PARAM_INDICES[self.section][self.attribute]
-
+        
         if self.row_attribute is not None:
             if self.row_attribute not in ROW_INDICES.get(self.section, {}):
                 raise ValueError(f"row attribute '{self.row_attribute}' not found in section '{self.section}'. Available attributes: {list(ROW_INDICES.get(self.section, {}).keys())}")
@@ -244,6 +171,11 @@ class CalParam():
         else:
             element_list = getattr(getattr(model.inp, self.section),self.key[0]).to_list()
 
+        element_list = np.unique(element_list).tolist()
+
+        # remove outfalls from calibration elements
+        outfalls = getattr(model.inp, "outfalls").index.to_list()
+        element_list = [id for id in element_list if id not in outfalls]
 
         for id in element_list:
             cp = self.copy()
@@ -262,26 +194,28 @@ class CalParam():
             cps.append(cp)
         return CalParams(cps)
 
-    def relative_bounds_to_absolute(self, upper:float=None, lower:float=None):
+    def relative_bounds_to_absolute(self, upper:float|None=None, lower:float|None=None):
         """
-        If not relative param changes, convert the upper and lower bounds
-        from relative to absolute, using the initial values of each parameter
+        if you want to adjust absolute parameters, 
+        but specify relative bounds (e.g., 10% above and below the initial value),
+        this function will convert the bounds for a calibration parameter.
         """
-        if not self.relative:
-            if upper is None:
-                upper = self.upper
+        if self.relative_bounds:
+            if not self.relative:
+                if upper is None:
+                    upper = self.upper
 
-            if lower is None:
-                lower = self.lower
+                if lower is None:
+                    lower = self.lower
 
-            self.lower = self.initial_value * (1+lower)
-            self.upper = self.initial_value * (1+upper)
+                self.lower = self.initial_value * (1+lower)
+                self.upper = self.initial_value * (1+upper)
 
-            # truncate the search bounds for distributed parameters
-            if self.lower < self.lower_limit:
-                self.lower = self.lower_limit
-            if self.upper > self.upper_limit:
-                self.upper = self.upper_limit
+                # truncate the search bounds for distributed parameters
+                if self.lower < self.lower_limit:
+                    self.lower = self.lower_limit
+                if self.upper > self.upper_limit:
+                    self.upper = self.upper_limit
         return self
 
 
@@ -337,15 +271,6 @@ class CalParams(list[CalParam]):
         """
         return CalParams([cp for cp in self if cp.section == section])
 
-    def to_dataframe(self) -> pd.DataFrame:
-        """
-        Convert the list of CalParams to a pandas DataFrame.
-
-        :return: DataFrame representation of CalParams
-        :rtype: pd.DataFrame
-        """
-        return cons_to_df(self)
-
     def distribute(self, model) -> "CalParams":
         """
         Distribute all CalParams in the list.
@@ -374,6 +299,7 @@ class CalParams(list[CalParam]):
 
             else:
                 if len(cp.key) > 1:
+                    # NOTE: multi-indexing is currently not supported
                     # in the case of a multi-indexed parameter, convert a copy of the SWMM section to a multi-index
                     index = cp.make_multi_index(model)
                     swmm_df = getattr(model.inp, cp.section).copy()
@@ -381,8 +307,13 @@ class CalParams(list[CalParam]):
                     cp.initial_value = swmm_df.loc[cp.element, cp.attribute]
 
                 else:
-                    index = getattr(getattr(model.inp, cp.section),cp.key[0]).to_list()
+                    index = getattr (getattr(model.inp, cp.section),cp.key[0]).to_list()
                     cp.initial_value = getattr(model.inp, cp.section).loc[cp.element, cp.attribute]
+
+                    if np.array(cp.initial_value).size > 1:
+                        cp.initial_value = cp.initial_value[cp.row_index]
+                    
+
 
             if cp.relative:
                 cp.x0 = -0.01
@@ -399,7 +330,7 @@ class CalParams(list[CalParam]):
         return CalParams(cps)
 
 
-    def relative_bounds_to_absolute(self, upper: float = None, lower: float = None):
+    def relative_bounds_to_absolute(self, upper: float | None = None, lower: float | None = None):
         """
         Set relative bounds for all CalParams in the list.
 
@@ -415,10 +346,49 @@ class CalParams(list[CalParam]):
             cps.append(cp)
         return CalParams(cps)
 
+    def to_df(self) -> pd.DataFrame:
+        """
+        Convert the list of CalParams to a pandas DataFrame.
 
-# TODO: fix this function
+        :return: DataFrame representation of CalParams
+        :rtype: pd.DataFrame
+        """
+        return _cons_to_df(self)
 
-def cons_to_df(cons: list[CalParam]) -> pd.DataFrame:
+    def from_df(self, filename:Path) -> "CalParams":
+        """
+        Convert a DataFrame to a list of CalParams.
+
+        :param df: DataFrame to convert
+        :type df: pd.DataFrame
+        :return: List of CalParams
+        :rtype: CalParams
+        """
+        df = pd.read_csv(filename, index_col=0)
+        cps = []
+        for _, row in df.iterrows():
+            cp = CalParam(
+                section=row['section'],
+                attribute=row['attribute'],
+                element=row['element'],
+                key=row['key'],
+                lower=row['lower'],
+                upper=row['upper'],
+                lower_limit=row['lower_limit'],
+                upper_limit=row['upper_limit'],
+                distributed=row['distributed'],
+                relative=row['relative'],
+                relative_bounds=row['relative_bounds'],
+                col_index=row['col_index'],
+                initial_value=row['initial_value'],
+                opt_value=row['opt_value'],
+                opt_value_absolute=row['opt_value_absolute'],
+                row_attribute=row['row_attribute'],
+            )
+            cps.append(cp)
+        return CalParams(cps)
+
+def _cons_to_df(cons: CalParams) -> pd.DataFrame:
     """
     Converts a list of constraints to a DataFrame.
 
@@ -427,7 +397,6 @@ def cons_to_df(cons: list[CalParam]) -> pd.DataFrame:
     :return: DataFrame of constraints
     :rtype: pd.DataFrame
     """
-
     df = pd.DataFrame(index=range(len(cons)))
     df['section'] = [cons.section for cons in cons]
     df['attribute'] = [cons.attribute for cons in cons]
@@ -441,10 +410,17 @@ def cons_to_df(cons: list[CalParam]) -> pd.DataFrame:
     df['upper_limit'] = [cons.upper_limit for cons in cons]
     df['distributed'] = [cons.distributed for cons in cons]
     df['relative'] = [cons.relative for cons in cons]
+    df['relative_bounds'] = [cons.relative_bounds for cons in cons]
     df['initial_value'] = [cons.initial_value for cons in cons]
+    df['x0'] = [cons.x0 for cons in cons]
+    df['row_index'] = [cons.row_index for cons in cons]
+    df['row_attribute'] = [cons.row_attribute for cons in cons]
     df['parent_section'] = [cons.parent_section for cons in cons]
+    df['tag'] = [cons.tag for cons in cons]
+    # Optionally add 'level' and 'node' if present
+    df['level'] = [getattr(cons, 'level', None) for cons in cons]
+    df['node'] = [getattr(cons, 'node', None) for cons in cons]
     return df
-
 
 def get_calibration_order(cons:list[CalParam], model:swmmio.Model) -> list[CalParam]:
     """
