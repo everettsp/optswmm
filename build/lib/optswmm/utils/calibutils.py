@@ -6,43 +6,36 @@ import os
 import sys
 import time
 import uuid
-import shutil
-import pickle
 import warnings
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-import contextlib
 from multiprocessing import freeze_support
+from contextlib import redirect_stdout, redirect_stderr
+
+
 
 # Third-party imports
 import numpy as np
 import pandas as pd
 import networkx as nx
-import yaml
 from scipy.optimize import differential_evolution, minimize
 from tqdm import tqdm
 
 # SWMM-related imports
 import swmmio
 from swmmio import Model
-import pyswmm.simulation
-from pyswmm import Simulation, Output, Nodes, Links, Subcatchments, SimulationPreConfig
+from pyswmm import Simulation, Output, SimulationPreConfig
 from swmm.toolkit import shared_enum
-from swmm.toolkit.shared_enum import SubcatchAttribute, NodeAttribute, LinkAttribute
-
-# Plotting
-import matplotlib.pyplot as plt
 
 # Local imports
-from optswmm.utils.swmmutils import get_node_timeseries, get_model_path, run_swmm, dataframe_to_dat, get_predictions_at_nodes
+from optswmm.utils.swmmutils import get_model_path
 from optswmm.utils import perfutils as pf
 from optswmm.utils.functions import sync_timeseries, invert_dict, load_dict
-from optswmm.utils.networkutils import get_upstream_nodes, get_downstream_nodes
-from optswmm.utils.calparams import CalParam, get_cal_params, get_calibration_order
+from optswmm.utils.networkutils import get_downstream_nodes
+from optswmm.utils.calparams import CalParam, CalParams
 from optswmm.utils.standardization import load_timeseries
 from optswmm.utils.optconfig import OptConfig
-from optswmm.defs import ROW_ATTRIBUTES, ROW_INDICES, PARAM_INDICES, SWMM_SECTION_SUBTYPES
 
 # Configure warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -172,6 +165,59 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     ).inp.save()
 
     counter = OptCount()
+
+
+    if opt.hierarchical:
+
+        #df = get_calibration_order(cal_params, cal_model)
+        #df = df[(df["node"] == "node_18") | (df["node"] == "None")]
+
+        #cal_params = get_calibration_order(cal_params, cal_model)
+
+        # remove nodes that aren't included among 'comparison nodes'
+        # this doesn't generalize super well, as there may be cases you'd still want to calibrate a node that isn't in the comparison nodes
+        # however in our case, this only includes the dummy-outfalls, since we have obs everywhere
+        #cal_params = [c for c in cal_params if c.node in opt.calibration_nodes]
+
+        # concatenate level 0 elements (those that are not associated with a specific node)
+        # this will result in a calibration pass prior, and after, the node-specific calibration
+        #levels = np.concatenate([levels,[0]])
+
+        # sort the calibration parameters by level
+        levels = [c.level for c in cal_params]
+        levels = np.unique(levels)
+        levels = np.sort(levels)
+
+        #calibration_order = np.argsort(levels)
+        #cal_params = [cal_params[i] for i in calibration_order]
+
+        #for cal_param in cal_params:
+        for level in levels:
+            cal_param_subset = CalParams([c for c in cal_params if c.level == level])
+            
+            node_subset = np.unique([c.node for c in cal_param_subset]).tolist()
+
+            #node_subset = [node for node in node_subset if node in opt.cfg["calibration_nodes"]]
+            #if "all" in [c.node.lower() for c in cal_param_subset]:
+            #    node_subset = opt.calibration_nodes
+
+            if len(node_subset) == 0:
+                pass
+            else:
+
+                # For multi-index columns, select columns where 'nodes' level matches cal_nodes
+
+                #cal_targets_subset = cal_targets.loc[:, cal_targets.columns.get_level_values('nodes').isin(node_subset)]
+
+                success = de_calibration(
+                    cal_forcings=cal_forcings,
+                    cal_targets=cal_targets,
+                    in_model=cal_model,
+                    cal_params=cal_param_subset,
+                    opt_config=opt,
+                    counter=counter,
+                    )
+
     
     success = de_calibration(
         cal_forcings=cal_forcings,
@@ -277,9 +323,9 @@ def set_params(cal_vals, cal_params, model: Model) -> Model:
 
         #swmm_val = getattr(model.inp, con.section).loc[idx,con.attribute]
 
-        #if cp.change == 'relative':
+        #if cp.change == 'multiplicative':
             #new_val = (1+cal_vals[ii]) * cp.initial_value
-        #elif cp.change == 'absolute':
+        #elif cp.change == 'direct':
         new_val = cal_vals[ii]
        # else:
         #    raise ValueError(f"Change type {cp.change} not recognized")
@@ -491,8 +537,13 @@ def de_score_fun(
     # Run simulation with updated parameters
     outputfile = str(Path(in_model).with_suffix('.out').resolve())
     
+
+    # In your de_score_fun function, modify the simulation execution:
     with Simulation(str(in_model), outputfile=outputfile, sim_preconfig=spc) as sim:
-        sim.execute()   
+        # Redirect output to suppress command line messages
+        with open(os.devnull, 'w') as devnull:
+            with redirect_stdout(devnull), redirect_stderr(devnull):
+                sim.execute()
 
     # Evaluate model performance
     score_df, timeseries_results = eval_model(outputfile=outputfile, cal_targets=cal_targets, opt_config=opt_config)
@@ -504,7 +555,10 @@ def de_score_fun(
     
     counter.increment()
 
-    return score_df[opt_config.score_function].mean()
+    # Handle NaN values by returning np.nanmean instead of mean
+    score = score_df[opt_config.score_function].values
+    score = score.astype(float)  # Ensure numeric
+    return np.nanmean(score)
 
 
 def _log_results(score_df, cal_params, iter, opt_config, timeseries_results):
@@ -540,7 +594,7 @@ def _log_results(score_df, cal_params, iter, opt_config, timeseries_results):
     if np.mod(iter, opt_config.log_every_n) == 0:
         for ii, _ in enumerate(cal_params):
             now = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-            line = f"{now},{iter},{cal_params[ii].ii},{cal_params[ii].initial_value},{cal_params[ii].opt_value},{cal_params[ii].opt_value_absolute}\n"
+            line = f"{now},{iter},{cal_params[ii].ii},{cal_params[ii].initial_value},{cal_params[ii].opt_value},{cal_params[ii].model_value}\n"
             with open(opt_config.results_file_params, 'a+') as f:
                 f.write(line)
 
@@ -671,9 +725,7 @@ def eval_model(outputfile, cal_targets, opt_config):
         obs = denormalise(obs, scaler)
         sim = denormalise(sim, scaler)
 
-    
-
-        #timeseries_results["hrt"].update({col: {"obs": obs.loc[:, col], "sim": sim.loc[:, col]} for col in obs.columns})
+    #timeseries_results["hrt"].update({col: {"obs": obs.loc[:, col], "sim": sim.loc[:, col]} for col in obs.columns})
 
 
     # invert sign of NSE since opt function will always minimize
@@ -756,183 +808,4 @@ def de_calibration(in_model,
     """
     
     return True
-
-
-"""
-def get_calibration_order(model, constraints) -> list[str]:
-
-    Sorts model elements from upstream to downstream for calibration, based on the networkx graph.
-
-    :param model: SWMM model object.
-    :type model: swmmio.Model
-    :param include_subcatchments: Include subcatchments in the calibration order.
-    :type include_subcatchments: bool
-    :param include_conduits: Include conduits in the calibration order.
-    :type include_conduits: bool
-    :param include_nodes: Include nodes in the calibration order.
-    :type include_nodes: bool
-    :returns: Elements in the calibration order and nodes in the calibration order.
-    :rtype: list of str
-
-    
-    nodes = list(model.network.nodes())
-    n_upstream_nodes = [len(get_upstream_nodes(model.network, n)) for n in nodes]
-    nodes_sorted = np.array(nodes)[np.argsort(n_upstream_nodes)[range(len(nodes))]]
-    node_ranks = {n:ii for ii, n in enumerate(nodes_sorted)}
-
-    conduit_ranks = {}
-    conduit_to_node2 = {}
-    if include_conduits:
-        conduit_to_node1 = {key:model.inp.conduits['InletNode'].to_dict()[key] for key in model.inp.conduits['InletNode'].to_dict()}
-        conduit_to_node2 = {key:model.inp.conduits['OutletNode'].to_dict()[key] for key in model.inp.conduits['OutletNode'].to_dict()}
-        conduit_ranks = {c:(node_ranks[conduit_to_node1[c]]+node_ranks[conduit_to_node2[c]])/2 for c in model.inp.conduits.index}
-
-    subcatchment_ranks = {}
-    subcatchment_to_node = {}
-    if include_subcatchments:
-        subcatchment_to_node = {key:model.inp.subcatchments['Outlet'].to_dict()[key] for key in model.inp.subcatchments['Outlet'].to_dict()}
-        subcatchment_ranks = {sc:node_ranks[subcatchment_to_node[sc]]+0.1 for sc in model.inp.subcatchments.index}
-
-    if not include_nodes:
-        node_ranks = {}
-
-    elements = list(node_ranks.keys()) + list(conduit_ranks.keys()) + list(subcatchment_ranks.keys())
-    ranks = list(node_ranks.values()) + list(conduit_ranks.values()) + list(subcatchment_ranks.values())
-    calibration_order = np.array(elements)[np.argsort(ranks)]
- 
-    if not include_nodes:
-        nodes = []
-        
-    elements = list(subcatchment_to_node.keys()) + list(conduit_to_node2.keys()) + list(nodes)
-    nodes = list(subcatchment_to_node.values()) + list(conduit_to_node2.values()) + list(nodes)
-    nearest_node = {e:n for e,n in zip(elements, nodes)}
-    node_order = [nearest_node[e] for e in calibration_order]
-    return calibration_order, node_order
-"""
-
-def preprocess_calibration_data(inp_model=Path('dat/winnipeg1/conceptual_model1.inp'), infoworks_dir="data/InfoWorks/exports/sims/batch", output_dir="dat/calibration-data"):
-    """
-    Preprocess the calibration data for the dry and wet weather calibration routines.
-
-    This is done because loading the infoworks, and calculating HRT is computationally expensive and doesn't need to be done for each calibration run.
-
-    :param inp_model: Path to the SWMM model.
-    :type inp_model: Path
-    :param infoworks_dir: Directory containing the InfoWorks simulation results.
-    :type infoworks_dir: str
-    :param output_dir: Directory to save the preprocessed calibration data.
-    :type output_dir: str
-    :returns: None
-    """
-    
-    model = Model(str(inp_model))
-    model_dir = get_model_path(model, as_str=False).parent
-
-    # load IW-SWMM node ID mapping
-    # comparison nodes comprised of SWMM junctions and outfalls
-    comparison_nodes_swmm = model.inp.junctions.index.to_list()# + model.inp.outfalls.index.to_list()
-
-    filename = Path(os.path.join(model_dir / 'node_id_conversion.json'))
-    if not filename.exists():
-        raise ValueError("node_id_conversion.json not found in model directory, is should be generated alongside the SWMM model in 'graph-to-swmm.py'")
-    node_id_conversion = invert_dict(load_dict(filename))
-
-    fname = open('iwm.pickle', 'rb')
-    iwm = pickle.load(fname)
-    filename = os.path.join(infoworks_dir, "dwf")
-    dwf = iwm.get_predictions_at_nodes(
-        Path(filename), 
-        nodes=[node_id_conversion[node] for node in comparison_nodes_swmm],
-        param="flow")
-    dwf.columns = comparison_nodes_swmm
-    dwf.to_csv(os.path.join(output_dir,"dry-weather_flow.csv"))
-    
-    dwf = iwm.get_predictions_at_nodes(
-        Path(filename), 
-        nodes=[node_id_conversion[node] for node in comparison_nodes_swmm],
-        param="depth")
-    dwf.columns = comparison_nodes_swmm
-    dwf.to_csv(os.path.join(output_dir,"dry-weather_depth.csv"))
-
-    filename = os.path.join(infoworks_dir,"april22")
-    
-    for param in ["flow","depth","vol"]:
-        df = iwm.get_predictions_at_nodes(
-            data_dir = Path(filename),
-            nodes=[node_id_conversion[node] for node in comparison_nodes_swmm],
-            param=param)
-        
-        df.columns = comparison_nodes_swmm
-        df.to_csv(os.path.join(output_dir,f"wet-weather_{param}.csv"))
-        
-    filename = os.path.join("data","InfoWorks",'exports', 'sims', 'batch',  "april22", "wwf_april22_depth.csv")
-    depth_results = get_link_results(filename)
-
-    filename = os.path.join("data","InfoWorks", 'exports', 'sims', 'batch',  "april22", "wwf_april22_flow.csv")
-    flow_results = get_link_results(filename)
-
-    A, P = flow_depth_to_AP(
-        depth=depth_results.mean().loc[iwm.geom.conduits.index],
-        height=iwm.geom.conduits["conduit_height"]/1000,
-        width=iwm.geom.conduits["conduit_width"]/1000,
-        shapes=iwm.geom.conduits["shape"]
-    )
-
-    conduit_hrts = iwm.geom.conduits.loc[:,"conduit_length"] / (flow_results.mean().loc[iwm.geom.conduits.index] / A)
-
-    paths = {}
-    for jx in model.inp.junctions.index.tolist():
-        # get the corresponding upstream and downstream nodes for each path in the network
-        upstream_node = node_id_conversion[jx]
-        downstream_node = node_id_conversion[get_downstream_nodes(model.network, jx)[-2]]
-        path = nx.dijkstra_path(iwm.graph, upstream_node, downstream_node)
-        # if path contains more than one node, get the path conduit IDs
-        if len(path) > 1:
-            paths[upstream_node] = [iwm.graph.edges[(path[ii], path[ii+1])]["id"] for ii, _ in enumerate(path[:-1])]
-        else:
-            paths[upstream_node] = []
-
-    hrts = np.array([np.nansum([conduit_hrts.loc[c] for c in paths[path] if c in conduit_hrts.index])/3600 for path in paths])
-    hrts[(hrts==0) | (hrts>100)] = np.nan
-    hrts = pd.DataFrame(data=hrts, index=model.inp.junctions.index.tolist())
-    hrts.to_csv(os.path.join(output_dir,"wet-weather_hrt.csv"))
-
-
-    folder = os.path.join("data/InfoWorks", 'rainfall')
-    file_precip = Path(os.path.join(output_dir, 'precip.pkl') )
-    precip_continuous = import_rainfall_folder(folder)
-    precip_continuous = pd.DataFrame(precip_continuous)
-    precip_continuous.columns = ['rg1']
-    precip_continuous.to_pickle(file_precip)
-
-
-
-class calibration_data():
-    """
-    need to know info
-    node id
-    param id
-
-    target/forcing
-
-    if forcing, make dat
-    
-    
-    """
-
-def get_shared_datetimeindex(x: dict[str: pd.DataFrame]) -> pd.DatetimeIndex:
-    """
-    Get the common datetimeindex of a dictionary of dataframes. Ignores dataframes with non-datetimeindex.
-
-    :param x: A dictionary of dataframes.
-    :type x: dict[str: pd.DataFrame]
-    :returns: The common datetimeindex of a dictionary of dataframes.
-    :rtype: pd.DatetimeIndex
-    """
-    dti = pd.concat([x[key] for key in x if type(x[key].index) == pd.DatetimeIndex], axis=1).dropna(axis=1, how="all").dropna(axis=0, how="any").index
-
-    return dti
-
-
-
 

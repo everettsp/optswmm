@@ -54,6 +54,9 @@ def kge(obs,sim) -> float:
     obs_mean = np.mean(obs)
     r_num = np.sum((sim - sim_mean) * (obs - obs_mean), axis=0)
     r_den = np.sqrt(np.sum((sim - sim_mean) ** 2, axis=0) * np.sum((obs - obs_mean) ** 2))
+
+    if np.isnan(r_den) | (r_den == 0):
+        return np.nan
     r = r_num / r_den
     alpha = np.std(sim, axis=0) / np.std(obs)
     beta = (np.sum(sim, axis=0) / np.sum(obs))

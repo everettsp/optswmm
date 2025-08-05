@@ -33,7 +33,7 @@ class OptConfig:
             score_function: str = "mse",
             algorithm: str = "differential-evolution",
             parallel: bool = False,
-            hierarchial: bool = False,
+            hierarchical: bool = False,
             log_every_n: int = 10,
             algorithm_options: Optional[dict] = None,
             save_timeseries: bool = False,
@@ -65,7 +65,7 @@ class OptConfig:
         self.score_function = score_function
         self.algorithm = algorithm
         self.parallel = parallel
-        self.hierarchial = hierarchial
+        self.hierarchical = hierarchical
         self.log_every_n = log_every_n
         self.algorithm_options = algorithm_options
         self.save_timeseries = save_timeseries
@@ -120,8 +120,7 @@ class OptConfig:
         with open(config_file, 'r') as file:
             for key, value in yaml.safe_load(file).items():
                 setattr(self, key, value)
-        self._standardize_config()    
-            
+        self._standardize_config()
 
     def _assign_default_opt_options(self):
         if (self.algorithm == "differential-evolution") & (self.algorithm_options is None):

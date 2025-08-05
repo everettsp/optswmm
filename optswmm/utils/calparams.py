@@ -7,16 +7,13 @@ import swmmio
 from pathlib import Path
 from swmmio import Model
 from warnings import warn as warning
+from typing import Optional, Union, List
 
-from pyswmm import Simulation, SimulationPreConfig, Subcatchments, Nodes, Links
+from pyswmm import SimulationPreConfig
 
-from optswmm.defs import SWMM_SECTION_SUBTYPES, ROW_ATTRIBUTES, ROW_INDICES, PARAM_INDICES
+from optswmm.defs import SWMM_SECTION_SUBTYPES, ROW_INDICES, PARAM_INDICES
 from optswmm.utils.networkutils import get_upstream_nodes
 
-
-from typing import Optional
-
-#DEFAULT_CHANGES = ['relative', 'absolute']
 
 def tuple_to_str(tup: tuple) -> str:
     """
@@ -29,265 +26,193 @@ def tuple_to_str(tup: tuple) -> str:
     """
     return '_'.join([str(x) for x in tup])
 
-class CalParam():
+
+class CalParam:
     def __init__(self,
                  section: str, 
                  attribute: str,
                  element: str = '',
-                 key:list[str]=["index"], 
+                 key: Union[str, List[str]] = "index", 
                  lower: float = 0.0, 
                  upper: float = np.inf, 
                  lower_limit: float = -np.inf, 
                  upper_limit: float = np.inf, 
                  distributed: bool = False,
-                 relative: bool = False,
+                 mode: str = 'direct',
                  relative_bounds: bool = True,
-                 col_index: int|None = None,
-                 initial_value:float = np.nan,
-                 opt_value:float = np.nan,
-                 opt_value_absolute:float = np.nan,
+                 col_index: Optional[int] = None,
+                 initial_value: float = np.nan,
+                 opt_value: float = np.nan,
+                 model_value: float = np.nan,
                  row_attribute: Optional[str] = None,
                  row_index: int = 0,
                  level: int = 0,
                  ii: int = 0,
                  ):
-        
         """
         Initialize a parameter for SWMM calibration.
 
         :param section: Section of SWMM INP file (e.g., subcatchments)
-        :type section: str
         :param attribute: Attribute of the section (e.g., slope)
-        :type attribute: str
+        :param element: Specific element ID (for distributed parameters)
+        :param key: Key for accessing multi-indexed parameters
         :param lower: Lower constraint of search-space
-        :type lower: float
         :param upper: Upper constraint of search-space
-        :type upper: float
-        :param lower_limit: Physics-based lower constraint for value (e.g., inflow >= 0)
-        :type lower_limit: float
+        :param lower_limit: Physics-based lower constraint for value
         :param upper_limit: Physics-based upper constraint for value
-        :type upper_limit: float
+        :param distributed: Whether to distribute parameter across all elements
+        :param multiplicative: Whether changes are multiplicative (multiplier) or direct
+        :param relative_bounds: Whether bounds are specified multiplicative to initial value
+        :param col_index: Column index for SWMM section
+        :param initial_value: Initial parameter value from model
+        :param opt_value: Optimized parameter value
+        :param opt_value_absolute: Absolute optimized parameter value
+        :param row_attribute: Row attribute for multi-row sections
+        :param row_index: Row index for multi-row sections
+        :param level: Calibration level for hierarchical optimization
+        :param ii: Index for mapping to calibration results
         :raises NotImplementedError: If section is not found in SWMM_SECTION_SUBTYPES
         """
-
-        if type(key) is str:
+        if isinstance(key, str):
             key = [key]
             
-        self.tag = '' # depreciated
         self.section = section
         self.attribute = attribute
         self.element = element
-        self.key = key # for multi-indexed parameters (made ~irrelevant by sim preconfig)
-        self.parent_section = ''
-        self.ii = None  # index for mapping to cal results; set in get_initial_values
-        self.lower = lower # lower search
-        self.upper = upper # upper search
-        self.lower_limit = lower_limit # lower physical constraint
-        self.upper_limit = upper_limit # upper physical constraint
-        self.distributed = distributed # whether to distribute the parameter across all elements
-        self.relative = relative # relative change (e.g., 0.5 is +50% the initial value), in contrast to absolute (e.g., +5mm/hr)
+        self.key = key
+        self.lower = lower
+        self.upper = upper
+        self.lower_limit = lower_limit
+        self.upper_limit = upper_limit
+        self.distributed = distributed
+        self.mode = mode
         self.relative_bounds = relative_bounds
         self.initial_value = initial_value
-        self.x0 = float('nan')
-        self.col_index = col_index  # numeric integer used while setting sim preconfig
+        self.opt_value = opt_value
+        self.model_value = model_value
+        self.row_attribute = row_attribute
         self.row_index = row_index
-        self.row_attribute = row_attribute # used for hydrographs, e.g., 'Short', 'Medium', 'Long'
-        self.opt_value = opt_value # value after optimization
-        self.opt_value_absolute = opt_value_absolute # absolute value after optimization
-        self.level = level # used for calibration order
-        self.node = None # used for calibration order
-        self.tag = "{}.{}.{}".format(self.section, self.attribute, self.element) # unique tag for the parameter
-        self.ii = ii  # index for mapping to cal results; set in get_initial_values
-        # if self.row_attribute is not None:
-        #self.distributed = False
+        self.level = level
+        self.ii = ii
+        
+        # Set derived attributes
+        self.x0 = float('nan')
+        self.col_index = col_index
+        self.parent_section = ''
+        self.node = ''
+        self.tag = f"{self.section}.{self.attribute}.{self.element}"
+        
         self._standardize()
 
-    def copy(self):
-        """
-        Returns a deep copy of Constraint.
-
-        :return: Deep copy of Constraint
-        :rtype: Constraint
-        """
+    def copy(self) -> "CalParam":
+        """Returns a deep copy of CalParam."""
         return deepcopy(self)
 
-    def truncate(self, val):
-        """
-        Truncates the search bounds for distributed parameters.
-        """
-        if self.lower_limit > val:
-            val = self.lower_limit
-        if self.upper_limit < val:
-            val = self.upper_limit
-        return val
+    def truncate(self, val: float) -> float:
+        """Truncate value to within physical limits."""
+        return np.clip(val, self.lower_limit, self.upper_limit)
     
     def _standardize(self):
-        """
-        Standardizes the constraints.
-
-        :raises ValueError: If change is not recognized or distributed is not a boolean
-        """
-        #if self.change not in DEFAULT_CHANGES:
-        #    raise ValueError(f"change '{self.change}' not recognised. Choices: {DEFAULT_CHANGES}")
-        #
-        if self.section not in list(SWMM_SECTION_SUBTYPES.keys()):
-            raise NotImplementedError(f"section '{self.section}' not found in SWMM_SECTION_SUPTYPES. If section is spelled correctly, might need to update DEFS. Currently implemented mappings: {list(SWMM_SECTION_SUBTYPES.keys())}.")
+        """Standardize and validate the calibration parameter."""
+        if self.section not in SWMM_SECTION_SUBTYPES:
+            raise NotImplementedError(
+                f"section '{self.section}' not found in SWMM_SECTION_SUBTYPES. "
+                f"Available: {list(SWMM_SECTION_SUBTYPES.keys())}"
+            )
         
         self.parent_section = SWMM_SECTION_SUBTYPES[self.section]
-
         self.col_index = PARAM_INDICES[self.section][self.attribute]
         
         if self.row_attribute is not None:
             if self.row_attribute not in ROW_INDICES.get(self.section, {}):
-                raise ValueError(f"row attribute '{self.row_attribute}' not found in section '{self.section}'. Available attributes: {list(ROW_INDICES.get(self.section, {}).keys())}")
-            self.row_index = ROW_INDICES.get(self.section, {}).get(self.row_attribute, None)
+                raise ValueError(
+                    f"row attribute '{self.row_attribute}' not found in section '{self.section}'. "
+                    f"Available: {list(ROW_INDICES.get(self.section, {}).keys())}"
+                )
+            self.row_index = ROW_INDICES[self.section][self.row_attribute]
 
-        #if not isinstance(self.distributed, bool):
-        #    raise ValueError(f"constraints 'distributed' parameter must be of type bool")
+    def make_multi_index(self, model: swmmio.Model) -> pd.MultiIndex:
+        """Create multi-index for multi-keyed parameters."""
+        index_arrays = [getattr(getattr(model.inp, self.section), key).to_list() for key in self.key]
+        return pd.MultiIndex.from_arrays(index_arrays)
 
-    def make_multi_index(self, model) -> pd.MultiIndex:
-        index = [getattr(getattr(model.inp, self.section),x).to_list() for x in self.key]
-        index = pd.MultiIndex.from_arrays(index)
-        return index
-
-    def distribute(self, model: swmmio.Model) -> list["CalParam"]:
+    def distribute(self, model: swmmio.Model) -> "CalParams":
         """
-        Unpacks constraints for each parameter and element for fully distributed calibration.
+        Create distributed calibration parameters for each element.
 
         :param model: SWMM model
-        :type model: swmmio.Model
-        :return: Updated Constraint object
-        :rtype: Constraint
+        :return: CalParams object with distributed parameters
         """
-        
-        #if row["distributed"]:
-        cps = list()
+        cps = []
 
-        # some parameters have more than one 'key' (e.g., hydrographs have 'col_index' and 'Response')
-        # you might have multiple unit hydrographs (UH1, UH2, etc.) and multiple responses (short, medium, long) for each hydrograph
-        # in such cases, we convert the SWMM dataframe (stored at swmmio.Model.inp) to a multi-indexed dataframe
-        # since we don't want to modify the Model object directly, we do this change on the fly
-        # if a constraint has a multi-index (identifiable by a tuple in the 'element' attribute), we convert the SWMM dataframe to a multi-index to access the corresponding value
-        
-        
         if len(self.key) > 1:
-            # in the case of a multi-indexed parameter, convert a copy of the SWMM section to a multi-index
             element_list = self.make_multi_index(model)
-            #swmm_df = getattr(model.inp, self.section).copy()
-            #swmm_df.set_index(index, inplace=True)
         else:
-            element_list = getattr(getattr(model.inp, self.section),self.key[0]).to_list()
+            element_list = getattr(getattr(model.inp, self.section), self.key[0]).to_list()
 
         element_list = np.unique(element_list).tolist()
 
-        # remove outfalls from calibration elements
-        outfalls = getattr(model.inp, "outfalls").index.to_list()
+        # Remove outfalls from calibration elements
+        outfalls = model.inp.outfalls.index.to_list()
         element_list = [id for id in element_list if id not in outfalls]
 
-        for id in element_list:
+        for element_id in element_list:
             cp = self.copy()
-            cp.element = id
+            cp.element = element_id
             
-            if isinstance(id, tuple):
-                id_str = tuple_to_str(id)
-            else:
-                id_str = str(id)
-
-            # create a unique 'tag' to use as the index for the constraints
-            # it contains all the information needed to set the parameter in the SWMM model
-            tag = "{}.{}.{}".format(cp.section, cp.attribute, id_str)
-            cp.tag = tag
-
+            id_str = tuple_to_str(element_id) if isinstance(element_id, tuple) else str(element_id)
+            cp.tag = f"{cp.section}.{cp.attribute}.{id_str}"
             cps.append(cp)
+            
         return CalParams(cps)
 
-    def relative_bounds_to_absolute(self, upper:float|None=None, lower:float|None=None):
-        """
-        if you want to adjust absolute parameters, 
-        but specify relative bounds (e.g., 10% above and below the initial value),
-        this function will convert the bounds for a calibration parameter.
-        """
+    def relative_to_absolute_search_bounds(self, upper: Optional[float] = None, lower: Optional[float] = None) -> "CalParam":
+        """Convert multiplicative bounds to absolute bounds based on initial value."""
         if self.relative_bounds:
-            if not self.relative:
-                if upper is None:
-                    upper = self.upper
+            if upper is None:
+                upper = self.upper
+            if lower is None:
+                lower = self.lower
 
-                if lower is None:
-                    lower = self.lower
-
-                self.lower = self.initial_value * (1+lower)
-                self.upper = self.initial_value * (1+upper)
-
-                # truncate the search bounds for distributed parameters
-                if self.lower < self.lower_limit:
-                    self.lower = self.lower_limit
-                if self.upper > self.upper_limit:
-                    self.upper = self.upper_limit
+            self.lower = max(self.initial_value * (1 + lower), self.lower_limit)
+            self.upper = min(self.initial_value * (1 + upper), self.upper_limit)
+            
         return self
 
 
-class CalParams(list[CalParam]):
-    def __init__(self, *args):
-        """
-        Initialize a list of CalParam objects.
-        """
-        super().__init__(*args)
+class CalParams(list):
+    """List of CalParam objects with additional functionality."""
+
+    def __init__(self, cal_params: Optional[List[CalParam]] = None):
+        """Initialize CalParams list."""
+        super().__init__(cal_params or [])
 
     def append(self, cal_param: CalParam):
-        """
-        Append a CalParam object to the list.
-
-        :param cal_param: Calibration parameter to append
-        :type cal_param: CalParam
-        """
+        """Append a CalParam object to the list."""
         if not isinstance(cal_param, CalParam):
             raise TypeError("Only CalParam objects can be appended.")
         super().append(cal_param)
 
-
-    def get_bounds(self):
+    def get_bounds(self) -> List[tuple]:
+        """Get optimization bounds for all parameters."""
         bounds = []
-
         for cp in self:
-            
-            # NOTE: temporarily commented out the truncation of the bounds, this is done later instead
-
-            #if cp.lower < cp.lower_limit:
-            #    lower = cp.lower_limit
-            #else:
-            #    lower = cp.lower
-            #if cp.upper > cp.upper_limit:
-            #    upper = cp.upper_limit
-            #else:
-            #    upper = cp.upper
-
             if cp.lower > cp.upper:
-                raise ValueError(f"Lower bound {cp.lower} is greater than upper bound {cp.upper} for parameter {cp.section}.{cp.attribute}.")
-            
+                raise ValueError(
+                    f"Lower bound {cp.lower} > upper bound {cp.upper} "
+                    f"for parameter {cp.section}.{cp.attribute}"
+                )
             bounds.append((cp.lower, cp.upper))
         return bounds
 
     def filter_by_section(self, section: str) -> "CalParams":
-        """
-        Filter the list of CalParams by section.
-
-        :param section: Section to filter by
-        :type section: str
-        :return: Filtered CalParams
-        :rtype: CalParams
-        """
+        """Filter parameters by section."""
         return CalParams([cp for cp in self if cp.section == section])
 
-    def distribute(self, model) -> "CalParams":
-        """
-        Distribute all CalParams in the list.
-
-        :param model: SWMM model
-        :type model: swmmio.Model
-        :return: Distributed CalParams
-        :rtype: CalParams
-        """
+    def distribute(self, model: swmmio.Model) -> "CalParams":
+        """Distribute all parameters in the list."""
         distributed = []
+        
         for cp in self:
             if cp.distributed:
                 distributed.extend(cp.distribute(model))
@@ -295,296 +220,210 @@ class CalParams(list[CalParam]):
                 distributed.append(cp)
         return CalParams(distributed)
 
-
-    def get_initial_values(self, model: swmmio.Model) -> list["CalParam"]:
-        cps = []
+    def get_initial_values(self, model: swmmio.Model) -> "CalParams":
+        """Extract initial values from the model."""
+        valid_cps = []
 
         for cp in self:
-
             if not cp.distributed:                
-                cp.initial_value = getattr(model.inp, cp.section).loc[:, cp.attribute].mean()
-
+                cp.initial_value = getattr(model.inp, cp.section)[cp.attribute].mean()
             else:
                 if len(cp.key) > 1:
-                    # NOTE: multi-indexing is currently not supported
-                    # in the case of a multi-indexed parameter, convert a copy of the SWMM section to a multi-index
+                    # Multi-indexed parameter
                     index = cp.make_multi_index(model)
                     swmm_df = getattr(model.inp, cp.section).copy()
                     swmm_df.set_index(index, inplace=True)
                     cp.initial_value = swmm_df.loc[cp.element, cp.attribute]
-
                 else:
-                    index = getattr (getattr(model.inp, cp.section),cp.key[0]).to_list()
                     cp.initial_value = getattr(model.inp, cp.section).loc[cp.element, cp.attribute]
-
+                    
                     if np.array(cp.initial_value).size > 1:
                         cp.initial_value = cp.initial_value[cp.row_index]
-                    
 
+            # Set initial guess
+            if cp.mode == "multiplicative":
+                cp.x0 = 0.05
+            elif cp.mode == "additive":
+                cp.x0 = cp.initial_value * 0.05
+            elif cp.mode == "direct":
+                cp.x0 = cp.initial_value * 0.95
 
-            if cp.relative:
-                cp.x0 = -0.01
-            else:
-                cp.x0 = cp.initial_value * 0.9
+            # Only include parameters with valid initial values
+            if not np.isnan(cp.initial_value):
+                valid_cps.append(cp)
 
-            if cp.initial_value != np.nan:
-                cps.append(cp)
+        # Set numeric indices for mapping
+        for ii, cp in enumerate(valid_cps):
+            cp.ii = ii
+            
+        return CalParams(valid_cps)
 
-
-        # here we set a numeric index to the cal-params to map the cal params saved during cal
-        for ii in range(len(cps)):
-            cps[ii].ii = ii
-        return CalParams(cps)
-
-
-    def relative_bounds_to_absolute(self, upper: float | None = None, lower: float | None = None):
-        """
-        Set relative bounds for all CalParams in the list.
-
-        :param upper: Upper bound multiplier
-        :type upper: float
-        :param lower: Lower bound multiplier
-        :type lower: float
-        """
-        cps = []
+    def relative_to_absolute_search_bounds(self, upper: Optional[float] = None, lower: Optional[float] = None) -> "CalParams":
+        """Convert multiplicative bounds to absolute for all non-multiplicative parameters."""
         for cp in self:
-            if not cp.relative:
-                cp.relative_bounds_to_absolute(upper=upper, lower=lower)
-            cps.append(cp)
-        return CalParams(cps)
+            if cp.relative_bounds:
+                cp.relative_to_absolute_search_bounds(upper=upper, lower=lower)
+        return self
+
+    def set_values(self, values: List[float]):
+        """Set optimization values for each parameter."""
+        if len(values) != len(self):
+            raise ValueError("Length of values must match length of calibration parameters.")
+
+        for cp, val in zip(self, values):
+            cp.opt_value = val
+            
+            if cp.mode == "multiplicative":
+                cp.model_value = cp.initial_value * (1 + val)
+            elif cp.mode == "additive":
+                cp.model_value = cp.initial_value + val
+            elif cp.mode == "direct":
+                cp.model_value = val
+
+    def make_simulation_preconfig(self, model: swmmio.Model) -> SimulationPreConfig:
+        """Create SimulationPreConfig with parameter updates."""
+        spc = SimulationPreConfig()
+
+        for cp in self:
+            val = cp.model_value
+            val = cp.truncate(val)
+
+            if not cp.distributed:
+                if cp.mode != "multiplicative":
+                    raise NotImplementedError("Non-distributed calibration params must be multiplicative")
+
+                section_df = getattr(model.inp, cp.section)
+                for element_id in section_df.index.unique():
+                    spc.add_update_by_token(
+                        section=cp.section,
+                        obj_id=element_id,
+                        index=cp.col_index,
+                        new_val=val,
+                        row_num=cp.row_index
+                    )
+            else:
+                spc.add_update_by_token(
+                    section=cp.section,
+                    obj_id=cp.element,
+                    index=cp.col_index,
+                    new_val=val,
+                    row_num=cp.row_index
+                )
+
+        return spc
+
+    def get_calibration_order(self, model: swmmio.Model) -> "CalParams":
+        """Sort parameters by calibration order based on network topology."""
+        node_level = {node: len(get_upstream_nodes(model.network, node)) 
+                     for node in model.network.nodes}
+        
+        for ii, _ in enumerate(self):
+            if self[ii].parent_section == "subcatchments":
+                node = model.inp.subcatchments.loc[self[ii].element, 'Outlet']
+                self[ii].level = node_level[node]
+                self[ii].node = node
+            elif self[ii].parent_section in ["conduit", "conduits", "link", "links"]:
+                node = model.inp.conduits.loc[self[ii].element, 'InletNode']
+                self[ii].level = node_level[node]
+                self[ii].node = node
+            elif self[ii].parent_section in ["nodes", "node"]:
+                self[ii].level = node_level[self[ii].element]
+                self[ii].node = self[ii].element
+            else:
+                self[ii].level = 0
+                self[ii].node = "all"
+
+        # Add small increments to avoid level collisions
+        nodes = [cp.node for cp in self if cp.node != "None"]
+        unique_nodes = np.unique(nodes).tolist()
+        level_increment = 1 / (len(unique_nodes) + 1)
+        level_adjustments = {node: ii * level_increment for ii, node in enumerate(unique_nodes)}
+
+        for ii, _ in enumerate(self):
+            if self[ii].node in level_adjustments:
+                self[ii].level += level_adjustments[self[ii].node]
+
+        return self
 
     def to_df(self) -> pd.DataFrame:
-        """
-        Convert the list of CalParams to a pandas DataFrame.
-
-        :return: DataFrame representation of CalParams
-        :rtype: pd.DataFrame
-        """
+        """Convert to pandas DataFrame."""
         return _cons_to_df(self)
 
-    def from_df(self, filename: Path) -> "CalParams":
-        """
-        Convert a DataFrame to a list of CalParams.
 
-        :param filename: Path to CSV file to read
-        :type filename: Path
-        :return: List of CalParams
-        :rtype: CalParams
-        """
+    def preprocess(self, opt):
+        """Preprocess parameters for calibration."""
+
+        model = Model(opt.model_file)
+        # Distribute parameters if needed
+        self = self.distribute(model=model)
+
+        # Get initial values from model
+        self = self.get_initial_values(model=model)
+
+        # Convert multiplicative bounds to absolute
+        self = self.relative_to_absolute_search_bounds()
+
+        # Set calibration order based on network topology
+        if opt.hierarchical:
+            self = self.get_calibration_order(model=model)
+        return self
+    
+    @classmethod
+    def from_df(cls, filename: Path) -> "CalParams":
+        """Create CalParams from CSV file."""
         df = pd.read_csv(filename, index_col=0)
         df = df.replace({np.nan: None})
-        
+
         cps = []
         for _, row in df.iterrows():
             cp = CalParam(
                 section=row['section'],
                 attribute=row['attribute'],
                 element=row['element'],
-                key=eval(row['key']) if isinstance(row['key'], str) else row['key'],
+                key=eval(row['key']) if isinstance(row['key'], str) and row['key'].startswith('[') else row['key'],
                 lower=row['lower'],
                 upper=row['upper'],
                 lower_limit=row['lower_limit'],
                 upper_limit=row['upper_limit'],
                 distributed=row['distributed'],
-                relative=row['relative'],
+                mode=row['mode'],
                 relative_bounds=row['relative_bounds'],
                 col_index=row['col_index'],
                 initial_value=row['initial_value'],
                 opt_value=row.get('opt_value', np.nan),
-                opt_value_absolute=row.get('opt_value_absolute', np.nan),
-                row_attribute=row.get('row_attribute', ''),
+                model_value=row.get('model_value', np.nan),
+                row_attribute=row.get('row_attribute'),
             )
             cps.append(cp)
-        return CalParams(cps)
-
-    def set_values(self, values):
-        """
-        Set the optimization values for each calibration parameter.
-
-        :param values: List of optimization values.
-        :type values: list[float]
-        """
-        if len(values) != len(self):
-            raise ValueError("Length of values must match length of calibration parameters.")
-
-        for cp, val in zip(self, values):
-            cp.opt_value = val
-            if cp.relative:
-                cp.opt_value_absolute = cp.initial_value * (1 + val)
-            else:
-                cp.opt_value_absolute = val
-
-    def make_simulation_preconfig(self, model):
-        """
-        Set up SimulationPreConfig with parameter updates.
-        
-        :param cal_params: List of calibration parameters.
-        :type cal_params: list[CalParam]
-        :param values: Parameter values from optimization.
-        :type values: list[float]
-        :param opt_config: Optimization configuration.
-        :type opt_config: OptConfig
-        :returns: Configured SimulationPreConfig object
-        :rtype: SimulationPreConfig
-        """
-        spc = SimulationPreConfig()
+        return cls(cps)
 
 
-        for cp in self:
-            val = cp.opt_value_absolute
-            
-            # Handle non-distributed parameters
-            if not cp.distributed:
-                if not cp.relative:
-                    raise NotImplementedError("Non-distributed calibration params must be set to 'relative'")
-
-                # Get the section dataframe and element IDs
-                section_df = getattr(model.inp, cp.section)
-                element_ids = section_df.index.unique()
-
-                for element_id in element_ids:
-                    """
-                    # Handle multi-index sections (e.g., hydrographs, LIDs, etc.)
-                    if len(section_df.index.unique()) != len(section_df):
-                        subsec = section_df.loc[[element_id], :]
-                        model_val = subsec.iloc[cp.row_index, :][cp.attribute]
-                    # Handle single-index sections
-                    else:
-                        model_val = section_df.loc[element_id, cp.attribute]
-                    """
-                    # Apply physical constraints
-                    new_val = cp.truncate(new_val)
-
-                    # Add update to simulation preconfig
-                    spc.add_update_by_token(
-                        section=cp.section,
-                        obj_id=element_id,
-                        index=cp.col_index,
-                        new_val=new_val,
-                        row_num=cp.row_index
-                    )
-
-            # Handle distributed parameters
-            else:
-                # Calculate new value (relative or absolute)
-                if cp.relative:
-                    new_val = cp.initial_value * (1 + val)
-                else:
-                    new_val = val
-
-                # Apply physical constraints
-                new_val = cp.truncate(new_val)
-
-                # Add update to simulation preconfig
-                spc.add_update_by_token(
-                    section=cp.section,
-                    obj_id=cp.element,
-                    index=cp.col_index,
-                    new_val=new_val,
-                    row_num=cp.row_index
-                )
-
-
-        return spc
-        
 def _cons_to_df(cons: CalParams) -> pd.DataFrame:
-
-    """
-    Converts a list of constraints to a DataFrame.
-
-    :param cons: List of constraints
-    :type cons: list[Constraint]
-    :return: DataFrame of constraints
-    :rtype: pd.DataFrame
-    """
-    df = pd.DataFrame(index=range(len(cons)))
-    df['section'] = [cons.section for cons in cons]
-    df['attribute'] = [cons.attribute for cons in cons]
-    df['element'] = [cons.element for cons in cons]
-    df['key'] = [cons.key for cons in cons]
-    df['ii'] = [cons.ii for cons in cons]
-    df['col_index'] = [cons.col_index for cons in cons]
-    df['lower'] = [cons.lower for cons in cons]
-    df['upper'] = [cons.upper for cons in cons]
-    df['lower_limit'] = [cons.lower_limit for cons in cons]
-    df['upper_limit'] = [cons.upper_limit for cons in cons]
-    df['distributed'] = [cons.distributed for cons in cons]
-    df['relative'] = [cons.relative for cons in cons]
-    df['relative_bounds'] = [cons.relative_bounds for cons in cons]
-    df['initial_value'] = [cons.initial_value for cons in cons]
-    df['x0'] = [cons.x0 for cons in cons]
-    df['row_index'] = [cons.row_index for cons in cons]
-    df['row_attribute'] = [cons.row_attribute for cons in cons]
-    df['parent_section'] = [cons.parent_section for cons in cons]
-    df['tag'] = [cons.tag for cons in cons]
-    # Optionally add 'level' and 'node' if present
-    df['level'] = [getattr(cons, 'level', None) for cons in cons]
-    df['node'] = [getattr(cons, 'node', None) for cons in cons]
-    return df
-
-def get_calibration_order(cons:list[CalParam], model:swmmio.Model) -> list[CalParam]:
-    """
-    Gets the calibration order based on the number of upstream nodes.
-
-    :param model: SWMM model
-    :type model: swmmio.Model
-    :return: Calibration order and node order
-    :rtype: list[str]
-    """
-
-    
-
-    node_level = {node:len(get_upstream_nodes(model.network, node)) for node in model.network.nodes}
-
-    cons_out = []
-
-
-    """
-    assign a level to each calibration parameter based on the number of upstream nodes
-    levels increase as you move downstream
-    nodes with the same level are incremented by a small amount to avoid overlapping constraints
-    """
-    for c in cons:
-
-        if c.parent_section == "subcatchments":
-            node = model.inp.subcatchments['Outlet'].to_dict()[c.element]
-            level = node_level[node]
-
-        elif c.parent_section in ["conduit", "conduits", "link","links"]:
-            node = model.inp.conduits['InletNode'].to_dict()[c.element]
-            level = node_level[node]
-
-        elif c.parent_section in ["nodes","node"]:
-            node = c.element
-            level = node_level[node]
-
-        else:
-            # some calibration parameters are not associated with a specific node, so these last
-            level = 0 #np.max(np.array(list(node_level.values()))) + 100
-            node = "all"
-
-        c.level = level
-        c.node = node
-        cons_out.append(c)
-
-    cons = deepcopy(cons_out)
-
-    
-    nodes = np.unique([c.node for c in cons if c.node != "None"]).tolist()
-
-    level_increment = 1/(len(nodes)+1)
-    level_adjusments = {node:ii * level_increment for ii, node in enumerate(nodes)}
-    
-    cons_out = []
-    for c in cons:
-        if c.node != "None":
-            c.level = c.level + level_adjusments[c.node]
-        cons_out.append(c)
-
-
-        
-
-    return cons_out
+    """Convert CalParams to DataFrame."""
+    data = {
+        'section': [cp.section for cp in cons],
+        'attribute': [cp.attribute for cp in cons],
+        'element': [cp.element for cp in cons],
+        'key': [cp.key for cp in cons],
+        'ii': [cp.ii for cp in cons],
+        'col_index': [cp.col_index for cp in cons],
+        'lower': [cp.lower for cp in cons],
+        'upper': [cp.upper for cp in cons],
+        'lower_limit': [cp.lower_limit for cp in cons],
+        'upper_limit': [cp.upper_limit for cp in cons],
+        'distributed': [cp.distributed for cp in cons],
+        'mode': [cp.mode for cp in cons],
+        'relative_bounds': [cp.relative_bounds for cp in cons],
+        'initial_value': [cp.initial_value for cp in cons],
+        'x0': [cp.x0 for cp in cons],
+        'row_index': [cp.row_index for cp in cons],
+        'row_attribute': [cp.row_attribute for cp in cons],
+        'parent_section': [cp.parent_section for cp in cons],
+        'tag': [cp.tag for cp in cons],
+        'level': [getattr(cp, 'level', None) for cp in cons],
+        'node': [getattr(cp, 'node', None) for cp in cons],
+    }
+    return pd.DataFrame(data)
 
 
 # Set parameters constraints for calibration optimization
@@ -625,10 +464,9 @@ def get_cal_params(routine, model):
     cps_distributed = cps_obj.distribute(model)
 
     # update the bounds relative to the initial values of each calibration parameter
-    cps_distributed = cps_distributed.relative_bounds_to_absolute()
+    cps_distributed = cps_distributed.relative_to_absolute_search_bounds()
 
     return cps_distributed
-
 
 def create_simpreconfig(cps, vals, model_file):
 
@@ -645,10 +483,10 @@ def create_simpreconfig(cps, vals, model_file):
         # if it's not a distributed parameter, get all element ids and apply the new value everywhere
         if not cp.distributed:
             with Simulation(model_file) as sim:
-                if not cp.relative:
-                    raise NotImplementedError("Non-distributed calibration params must be set to 'relative'")
+                if cp.mode != "multiplicative":
+                    raise NotImplementedError("Non-distributed calibration params must be set to 'multiplicative'")
                 
-                # the calibrated value 'val' is the relative change - so we need to calculate the new model values relative to the initial values
+                # the calibrated value 'val' is the multiplicative change - so we need to calculate the new model values multiplicative to the initial values
                 val_map = getattr(Model(model_file).inp, cp.section).loc[:,cp.attribute].to_dict()
                 for element_id, model_val in val_map.items():
                     new_val = model_val * (1 + val)
@@ -657,8 +495,8 @@ def create_simpreconfig(cps, vals, model_file):
         
             # if it's a distributed calibration parameter
         else:
-            # if the calibrated value 'val' is the relative change - so we need to calculate the new model values relative to the initial values
-            if cp.relative:
+            # if the calibrated value 'val' is the multiplicative change - so we need to calculate the new model values multiplicative to the initial values
+            if cp.mode == "multiplicative":
                 new_val = cp.initial_value * (1 + val)
             # otherwise, the value can be set directly
             else:
@@ -704,7 +542,7 @@ def get_simpreconfig_at_iter(run_dir, iter=None):
                 upper=row.upper,
                 upper_limit=row.upper_limit,
                 lower_limit=row.lower_limit,
-                relative=row.relative,
+                mode=row.mode,
                 distributed=row.distributed,
                 initial_value = row.initial_value)
         cps.append(cp)

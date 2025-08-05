@@ -83,23 +83,24 @@ for station_id in tqdm(station_ids):
         report_step = pd.Timestamp("01:00:00"),
         dry_step = pd.Timestamp("01:00:00"),
         wet_step = pd.Timestamp("00:30:00"),
+        hierarchical=True,
     )
 
+    distributed = True
     cps = CalParams()
-    cps.append(CalParam(section='infiltration', attribute='CurveNum', lower=-1, upper=1, lower_limit=0, upper_limit=100, distributed=False, relative=True))
-    cps.append(CalParam(section='subcatchments', attribute='PercImperv', lower=-1, upper=1, lower_limit=0, upper_limit=100, distributed=False, relative = True))
+    cps.append(CalParam(section='infiltration', attribute='CurveNum', lower=-1, upper=1, lower_limit=0, upper_limit=100, distributed=distributed, relative=True))
+    cps.append(CalParam(section='subcatchments', attribute='PercImperv', lower=-1, upper=1, lower_limit=0, upper_limit=100, distributed=distributed, relative=True))
     #cps.append(CalParam(section='subcatchments', attribute='Area', lower=-0.2, upper=0.2, lower_limit=0, upper_limit=100000000, distributed=False, relative=True))
-    cps.append(CalParam(section='subcatchments', attribute='Width', lower=-0.999, upper=8, lower_limit=0, upper_limit=10000000, distributed=False, relative=True))
-    cps.append(CalParam(section='subareas', attribute='N-Perv', lower=-0.99999999, upper=1, lower_limit=0, upper_limit=10000000, distributed=False, relative=True))
-    cps.append(CalParam(section='subareas', attribute='N-Imperv', lower=-0.99999999, upper=1, lower_limit=0, upper_limit=10000000, distributed=False, relative=True))
+    cps.append(CalParam(section='subcatchments', attribute='Width', lower=-0.999, upper=8, lower_limit=0, upper_limit=10000000, distributed=distributed, relative=True))
+    cps.append(CalParam(section='subareas', attribute='N-Perv', lower=-0.99999999, upper=1, lower_limit=0, upper_limit=10000000, distributed=distributed, relative=True))
+    cps.append(CalParam(section='subareas', attribute='N-Imperv', lower=-0.99999999, upper=1, lower_limit=0, upper_limit=10000000, distributed=distributed, relative=True))
     #cps.append(CalParam(section='subcatchments', attribute='Slope', lower=1, upper=0.5, lower_limit=0, upper_limit=100, distributed=False))
-    cps.append(CalParam(section='xsections', attribute='Geom2', lower=-0.2, upper=0.2, lower_limit=0.05, upper_limit=5, distributed=False, relative=True))
-    cps.append(CalParam(section='inflows', attribute='Baseline', lower=-0.2, upper=0.2, lower_limit=0, upper_limit=10, distributed=False, relative=True))
+    cps.append(CalParam(section='xsections', attribute='Geom2', lower=-0.2, upper=0.2, lower_limit=0.05, upper_limit=5, distributed=distributed, relative=True))
+    cps.append(CalParam(section='inflows', attribute='Baseline', lower=-0.2, upper=0.2, lower_limit=0, upper_limit=10, distributed=distributed, relative=True))
 
     #cps.append(CalParam(section='conduits', attribute='Roughness', lower=0.5, upper=0.5, lower_limit=0, upper_limit=1, distributed=True))
-    cps = cps.distribute(model=Model(str(model_file)))
-    cps = cps.get_initial_values(model=Model(str(model_file)))
-    cps = cps.relative_bounds_to_absolute()
+    
+    cps = cps.preprocess(model=Model(str(model_file)))
 
     # here we skip calibrations with the same name, to deal with the script failing often
 

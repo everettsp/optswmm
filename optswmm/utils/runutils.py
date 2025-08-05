@@ -88,10 +88,7 @@ import plotly.express as px
 
 
 def _plot_param_changes(df, xaxis="iter"):
-    
-
     # Plot all parameter values over time, colored by parameter name
-
     if xaxis not in XAXIS_CHOICES:
         raise ValueError(f"xaxis must be one of {XAXIS_CHOICES}")
 
@@ -142,6 +139,18 @@ def _plot_run_minimization(df:pd.DataFrame, xaxis="iter"):
             name="Run Scores"
         )
         fig.add_trace(trace)
+
+    df.groupby("iter")["score"].mean().reset_index()
+    trace = go.Scatter(
+        x=df["iter"],
+        y=df.groupby("iter")["score"].mean(),
+        mode='lines',
+        name="Mean Score",
+        line=dict(dash='dash', width=2, color='black')
+    )
+    fig.add_trace(trace)
+
+
     fig.update_layout(
         title="Run Scores",
         xaxis_title="Iteration" if xaxis == "iter" else "Datetime",
@@ -160,17 +169,34 @@ class OptRun:
     Class to handle the optimization run, including initialization and plotting of results.
     """
 
-    def __init__(self, run_loc: Path):
+    def __init__(self, run_loc: Path, load_results:bool=True):
         self.dir = run_loc
         self.name = run_loc.name
+        self.config = self._get_config()
+
         try:
             self.date = datetime.strptime(self.name.split("_")[1], "%d-%m-%y-%H%M%S")
         except Exception:
             self.date = None
         
+        # option to not load results, in case you just want a big run summary
+        if load_results:
+            self.get_scores()
+            self.get_params()
+        else:
+            self.scores = None
+            self.params = None
 
-        self.get_scores()
-        self.get_params()
+    def _get_config(self):
+        """
+        Load the configuration dictionary from the run directory.
+        """
+        config_file = self.dir / "config.yml"
+        if not config_file.exists():
+            raise FileNotFoundError(f"Configuration file {config_file} does not exist.")
+        
+        return load_dict(config_file)
+    
 
     def get_timeseries(self, ii=None):
         """
@@ -199,6 +225,16 @@ class OptRun:
         return obs, sim
     
 
+    def best_iter(self):
+        """
+        Get the best iteration based on the minimum score.
+        """
+        if self.scores is None or self.scores.empty:
+            raise ValueError("No scores available to determine best iteration.")
+        
+        best_iter = self.scores.groupby("iter")["score"].mean().idxmax()
+        return best_iter
+    
     def get_scores(self):
         """
         Get the scores from the optimization run.
@@ -235,11 +271,18 @@ class OptRun:
         param_index.loc[param_index["element"].isnull(), "element"] = "lumped"
         param_index["param_tag"] = [f"{p['section']}_{p['attribute']}_{p['element']}" for _, p in param_index.iterrows()]
 
+
+        for row, name in param_index[param_index.row_attribute.notna()].iterrows():
+            param_index.at[name.name, "param_tag"] = f"{param_index.at[name.name, 'param_tag']}_{param_index.at[name.name, 'row_attribute']}"
+
+
         params["param_tag"] = params["ii"].map(param_index["param_tag"])
         params["element"] = params["ii"].map(param_index["element"])
         params["section"] = params["ii"].map(param_index["section"])
         params["attribute"] = params["ii"].map(param_index["attribute"])
-
+        params["row_attribute"] = params["ii"].map(param_index["row_attribute"])
+        params["col_index"] = params["ii"].map(param_index["col_index"])
+        params["row_index"] = params["ii"].map(param_index["row_index"])
         self.params = params
         return params
 
@@ -251,15 +294,22 @@ class OptRun:
         :type model: Path
         """
         if iter is None:
-            iter = self.scores.groupby("iter")["score"].mean().argmax().astype(int)
+            iter = self.best_iter()
 
-        params = self.params[self.params["iter"] == iter].copy()
+        # Find the nearest available iteration in self.params["iter"]
+
+        available_iters = np.sort(self.params["iter"].unique())
+        nearest_idx = np.searchsorted(available_iters, iter)
+        if nearest_idx == len(available_iters):
+            nearest_idx -= 1
+        nearest_iter = available_iters[nearest_idx]
+        params = self.params[self.params["iter"] == nearest_iter].copy()
 
         cal_params_file = self.dir / "calibration_parameters.csv"
         cp = CalParams().from_df(cal_params_file)
+        cp.set_values(params.cal_val.values)
+        return cp.make_simulation_preconfig(model=model)
 
-        cp.make_simulation_preconfig(model=model)
-        return 
 
     def plot_scores(self, xaxis="iter"):
         """
@@ -283,14 +333,31 @@ class OptRuns:
     Iterable collection of OptRun objects.
     """
 
-    def __init__(self, runs_dir: Path):
+    def __init__(self, runs_dir: Path, load_results:bool=False, tag:str=None):
         if isinstance(runs_dir, str):
             runs_dir = Path(runs_dir)
         if not runs_dir.is_dir():
             raise ValueError("runs_dir must be a directory containing run folders.")
-        self.run_dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
-        self.runs = [OptRun(run_loc=run_dir) for run_dir in self.run_dirs]
+        
+        run_dirs = []
 
+        # only include directories that have a scores file, otherwise they failed on initialization
+        for run in runs_dir.iterdir():
+            if run.is_dir() and (run / DEFAULT_SCORES_FILENAME).exists():
+                run_dirs.append(run)
+        self.run_dirs = run_dirs
+
+        if tag is not None:
+            self.run_dirs = [run_dir for run_dir in self.run_dirs if tag in run_dir.name]
+            
+        self.load_results = load_results  # Default to loading results
+
+        self.runs = [OptRun(run_loc=run_dir, load_results=load_results) for run_dir in self.run_dirs]
+
+        # if loading results, filter results with empty score
+        if self.load_results:
+            self.runs = [r for r in self.runs if r.scores is not None and not r.scores.empty]
+                
     def __iter__(self):
         return iter(self.runs)
 
@@ -307,11 +374,19 @@ class OptRuns:
         data = {
             "name": [run.name for run in self.runs],
             "date": [run.date for run in self.runs],
-            "scores": [run.scores for run in self.runs],
-            "params": [run.get_params() for run in self.runs]
+            "model_file": [run.config.get("model_file", None) for run in self.runs],
+            "algorithm": [run.config.get("algorithm", None) for run in self.runs],
+            "hierarchical": [run.config.get("hierarchical", False) for run in self.runs],
+            "normalize": [run.config.get("normalize", None) for run in self.runs],
+            "target_variables": [', '.join(run.config.get("target_variables", [])) for run in self.runs],
+            "score_function": [', '.join(run.config.get("score_function", [])) for run in self.runs],
+            "max_iter": [run.config.get("algorithm_options", {}).get("maxiter", None) for run in self.runs],
+            #"scores": [run.scores for run in self.runs],
+            #"params": [run.get_params() for run in self.runs]
         }
         return pd.DataFrame(data)
     
+
     def plot_scores(self):
         """
         Plot the scores of all runs in the collection.
