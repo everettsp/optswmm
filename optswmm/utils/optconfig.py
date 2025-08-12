@@ -6,7 +6,6 @@ from pathlib import Path
 import warnings
 import pandas as pd
 import numpy as np
-
 from swmmio import Model
 
 from optswmm.defs import ALGORITHMS
@@ -83,7 +82,6 @@ class OptConfig:
             #raise NotImplementedError("Config file not implemented")
             #self._validate_config_file(config_file)
             self.load_config(config_file)
-
 
 
     def _initialize_run(self):

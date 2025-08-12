@@ -103,11 +103,13 @@ def _plot_param_changes(df, xaxis="iter"):
     )
     fig.show()
 
-def _plot_run_minimization(df:pd.DataFrame, xaxis="iter"):
+def _plot_run_minimization(df: pd.DataFrame, xaxis="iter", smooth: float = 0):
     """
     Plot the minimization scores from a DataFrame or directory of runs.
     :param df: DataFrame containing run scores or path to a directory with run results.
     :type df: Path, str, or pd.DataFrame
+    :param smooth: Smoothing factor between 0 (no smoothing) and 1 (maximum smoothing).
+    :type smooth: float
     :raises ValueError: If the DataFrame does not contain 'score' and 'iter' columns or is empty.
     """
     if xaxis not in XAXIS_CHOICES:
@@ -119,37 +121,59 @@ def _plot_run_minimization(df:pd.DataFrame, xaxis="iter"):
     if df.empty:
         raise ValueError("DataFrame is empty. No runs to plot.")
 
+    def smooth_series(series, factor):
+        """
+        Smooth a pandas Series using a rolling mean.
+        factor: float between 0 and 1, where 0 = no smoothing, 1 = max smoothing (window = len(series))
+        """
+        if not 0 <= factor <= 1:
+            raise ValueError("factor must be between 0 and 1")
+        window = max(1, int(len(series) * factor))
+        return series.rolling(window=window, min_periods=1).mean()
 
     fig = go.Figure()
     if "node" in df.columns:
         for node in df["node"].unique():
-            node_df = df[df["node"] == node]
+            node_df = df[df["node"] == node].sort_values(xaxis)
+            x_vals = node_df[xaxis].values
+            y_vals = node_df["score"].values
+            if smooth > 0:
+                y_vals = smooth_series(pd.Series(y_vals), smooth).values
             trace = go.Scatter(
-                x=node_df[xaxis],
-                y=node_df["score"],
+                x=x_vals,
+                y=y_vals,
                 mode='lines',
                 name=f"Node: {node}"
             )
             fig.add_trace(trace)
     else:
+        df_sorted = df.sort_values(xaxis)
+        x_vals = df_sorted[xaxis].values
+        y_vals = df_sorted["score"].values
+        if smooth > 0:
+            y_vals = smooth_series(pd.Series(y_vals), smooth).values
         trace = go.Scatter(
-            x=df.loc[:,xaxis],
-            y=df.loc[:,"score"],
+            x=x_vals,
+            y=y_vals,
             mode='lines',
             name="Run Scores"
         )
         fig.add_trace(trace)
 
-    df.groupby("iter")["score"].mean().reset_index()
+    # Mean score trace (smoothed if requested)
+    mean_scores = df.groupby(xaxis)["score"].mean().sort_index()
+    mean_x = mean_scores.index.values
+    mean_y = mean_scores.values
+    if smooth > 0:
+        mean_y = smooth_series(mean_scores, smooth).values
     trace = go.Scatter(
-        x=df["iter"],
-        y=df.groupby("iter")["score"].mean(),
+        x=mean_x,
+        y=mean_y,
         mode='lines',
         name="Mean Score",
         line=dict(dash='dash', width=2, color='black')
     )
     fig.add_trace(trace)
-
 
     fig.update_layout(
         title="Run Scores",
@@ -311,14 +335,14 @@ class OptRun:
         return cp.make_simulation_preconfig(model=model)
 
 
-    def plot_scores(self, xaxis="iter"):
+    def plot_scores(self, xaxis="iter", smooth=0):
         """
         Plot the scores of the optimization run.
         :param xaxis: The x-axis to use for the plot. Options are 'iter' or 'datetime'.
         :type xaxis: str
         """
-
-        _plot_run_minimization(self.scores, xaxis=xaxis)
+    
+        _plot_run_minimization(self.scores, xaxis=xaxis, smooth=smooth)
 
     def plot_param_changes(self, xaxis="iter"):
         """

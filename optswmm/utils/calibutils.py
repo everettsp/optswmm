@@ -21,6 +21,8 @@ import pandas as pd
 import networkx as nx
 from scipy.optimize import differential_evolution, minimize
 from tqdm import tqdm
+import psutil
+import gc
 
 # SWMM-related imports
 import swmmio
@@ -197,6 +199,13 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
             
             node_subset = np.unique([c.node for c in cal_param_subset]).tolist()
 
+            downstream_nodes = []
+            for node in node_subset:
+                downstream_nodes.extend(get_downstream_nodes(cal_model.network, node))
+                
+            node_subset = list(set(downstream_nodes))
+
+
             #node_subset = [node for node in node_subset if node in opt.cfg["calibration_nodes"]]
             #if "all" in [c.node.lower() for c in cal_param_subset]:
             #    node_subset = opt.calibration_nodes
@@ -207,11 +216,11 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
 
                 # For multi-index columns, select columns where 'nodes' level matches cal_nodes
 
-                #cal_targets_subset = cal_targets.loc[:, cal_targets.columns.get_level_values('nodes').isin(node_subset)]
+                cal_targets_subset = cal_targets.loc[:, cal_targets.columns.get_level_values('nodes').isin(node_subset)]
 
                 success = de_calibration(
                     cal_forcings=cal_forcings,
-                    cal_targets=cal_targets,
+                    cal_targets=cal_targets_subset,
                     in_model=cal_model,
                     cal_params=cal_param_subset,
                     opt_config=opt,
@@ -499,6 +508,25 @@ def copy_temp_file(filename:Path, tag="TEMP_FILE"):
 
 
 
+def get_open_file_count():
+    """Get the current number of open file descriptors for this process."""
+    try:
+        process = psutil.Process()
+        return len(process.open_files())
+    except Exception:
+        return -1
+
+def log_open_files():
+    """Log currently open files for debugging."""
+    try:
+        process = psutil.Process()
+        open_files = process.open_files()
+        print(f"Open files count: {len(open_files)}")
+        for f in open_files:
+            print(f"  {f.path}")
+    except Exception as e:
+        print(f"Could not get open files: {e}")
+
 def de_score_fun(
         values,
         in_model,
@@ -508,45 +536,81 @@ def de_score_fun(
         opt_config):
     """
     Optimization score function.
-
-    :param values: Parameter values.
-    :type values: list of floats
-    :param in_model: Initial model.
-    :type in_model: swmmio.Model object
-    :param cal_params: Calibration parameters.
-    :type cal_params: list[CalParam]
-    :param cal_targets: Calibration targets.
-    :type cal_targets: pd.DataFrame
-    :param eval_nodes: Nodes to evaluate.
-    :type eval_nodes: list of str
-    :param counter: Optimization counter.
-    :type counter: OptCount
-    :param opt_config: Optimization configuration.
-    :type opt_config: OptConfig
-    :returns: Optimization score.
-    :rtype: float
     """
+    
+    # Monitor file handles at start
+    initial_file_count = get_open_file_count()
     
     # Set up simulation preconfig with parameter updates
     cal_params.set_values(values)
     spc = cal_params.make_simulation_preconfig(model=opt_config.model)
 
-    # Fix model strings to avoid blank timeseries bug
-    #fix_model_strings(in_model)
-
     # Run simulation with updated parameters
     outputfile = str(Path(in_model).with_suffix('.out').resolve())
     
+    def cleanup_files():
+        """Clean up simulation files"""
+        for ext in [".out", ".rpt"]:
+            try:
+                file_path = Path(outputfile).with_suffix(ext)
+                if file_path.exists():
+                    file_path.unlink()
+            except Exception:
+                pass
 
     # In your de_score_fun function, modify the simulation execution:
-    with Simulation(str(in_model), outputfile=outputfile, sim_preconfig=spc) as sim:
+    sim_failed = False
+    sim = None
+    try:
+        sim = Simulation(str(in_model), outputfile=outputfile, sim_preconfig=spc)
+        
         # Redirect output to suppress command line messages
         with open(os.devnull, 'w') as devnull:
             with redirect_stdout(devnull), redirect_stderr(devnull):
-                sim.execute()
+                
+                max_retries = 3  # Reduced retries to prevent file buildup
+                for attempt in range(max_retries):
+                    try:
+                        sim.execute()
+                        break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            cleanup_files()
+                            time.sleep(0.1)
+                            continue
+                        else:
+                            sim_failed = True
+    finally:
+        # Ensure simulation object is properly closed
+        if sim is not None:
+            try:
+                sim.close()
+            except Exception:
+                pass
 
-    # Evaluate model performance
-    score_df, timeseries_results = eval_model(outputfile=outputfile, cal_targets=cal_targets, opt_config=opt_config)
+    if sim_failed:
+        cleanup_files()
+        return np.nan
+
+    try:
+        # Evaluate model performance
+        score_df, timeseries_results = eval_model(outputfile=outputfile, cal_targets=cal_targets, opt_config=opt_config)
+    except Exception as e:
+        cleanup_files()
+        return np.nan
+    finally:
+        # Clean up output files after evaluation
+        cleanup_files()
+        
+        # Force garbage collection to close any lingering file handles
+        gc.collect()
+        
+        # Monitor file handles at end and warn if increasing
+        final_file_count = get_open_file_count()
+        if final_file_count > initial_file_count + 5:  # Allow some tolerance
+            print(f"Warning: File handle count increased from {initial_file_count} to {final_file_count}")
+            if final_file_count > 100:  # Arbitrary threshold
+                log_open_files()
     
     iter = counter.get_count()
 
@@ -631,7 +695,9 @@ def get_simulation_results(outputfile:str|Path, station_ids:list[str], params:li
         :rtype: pd.DataFrame
         """
         dfs = []
-        with Output(outputfile) as out:
+        out = None
+        try:
+            out = Output(outputfile)
             for station_id in station_ids:
                 for param in params:  
                     if param in ["discharge(cms)", "flow(cms)"]:
@@ -647,6 +713,17 @@ def get_simulation_results(outputfile:str|Path, station_ids:list[str], params:li
                             columns=pd.MultiIndex.from_tuples([(param, station_id)])
                         ).copy()
                     )
+        finally:
+            # Ensure output file is properly closed
+            if out is not None:
+                try:
+                    out.close()
+                except Exception:
+                    pass
+        
+        if not dfs:
+            raise ValueError("No data extracted from simulation results")
+            
         df = pd.concat(dfs, axis=1)
         df.columns = pd.MultiIndex.from_tuples(df.columns)
         return df
