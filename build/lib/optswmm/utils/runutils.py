@@ -103,7 +103,18 @@ def _plot_param_changes(df, xaxis="iter"):
     )
     fig.show()
 
-def _plot_run_minimization(df: pd.DataFrame, xaxis="iter", smooth: float = 0):
+
+
+def _plot_run_minimization(
+    df: pd.DataFrame,
+    xaxis="iter",
+    smooth: float = 0,
+    mean: bool = True,
+    median: bool = False,
+    distributed: bool = True,
+    quantile=None,
+    fig=None
+):
     """
     Plot the minimization scores from a DataFrame or directory of runs.
     :param df: DataFrame containing run scores or path to a directory with run results.
@@ -131,49 +142,96 @@ def _plot_run_minimization(df: pd.DataFrame, xaxis="iter", smooth: float = 0):
         window = max(1, int(len(series) * factor))
         return series.rolling(window=window, min_periods=1).mean()
 
-    fig = go.Figure()
-    if "node" in df.columns:
-        for node in df["node"].unique():
-            node_df = df[df["node"] == node].sort_values(xaxis)
-            x_vals = node_df[xaxis].values
-            y_vals = node_df["score"].values
+    if fig is None:
+        fig = go.Figure()
+
+    if distributed:
+        if "node" in df.columns:
+            for node in df["node"].unique():
+                node_df = df[df["node"] == node].sort_values(xaxis)
+                x_vals = node_df[xaxis].values
+                y_vals = node_df["score"].values
+                if smooth > 0:
+                    y_vals = smooth_series(pd.Series(y_vals), smooth).values
+                trace = go.Scatter(
+                    x=x_vals,
+                    y=y_vals,
+                    mode='lines',
+                    name=f"Node: {node}"
+                )
+                fig.add_trace(trace)
+        else:
+            df_sorted = df.sort_values(xaxis)
+            x_vals = df_sorted[xaxis].values
+            y_vals = df_sorted["score"].values
             if smooth > 0:
                 y_vals = smooth_series(pd.Series(y_vals), smooth).values
             trace = go.Scatter(
                 x=x_vals,
                 y=y_vals,
                 mode='lines',
-                name=f"Node: {node}"
+                name="Run Scores"
             )
             fig.add_trace(trace)
-    else:
-        df_sorted = df.sort_values(xaxis)
-        x_vals = df_sorted[xaxis].values
-        y_vals = df_sorted["score"].values
+
+    # Mean score trace (smoothed if requested)
+    mean_x = df.index.values
+
+    if quantile is not None:
+        if quantile < 0 or quantile > 1:
+            raise ValueError("quantile must be between 0 and 1")
+        if quantile >= 0 and quantile <= 0.5:
+            quantile = 1 - quantile
+
+        p10_scores = df.groupby(xaxis)["score"].quantile(1-quantile).sort_index()
+        p90_scores = df.groupby(xaxis)["score"].quantile(quantile).sort_index()
+        x_vals = p10_scores.index.values
+
         if smooth > 0:
-            y_vals = smooth_series(pd.Series(y_vals), smooth).values
+            p10_scores = smooth_series(p10_scores, smooth).values
+            p90_scores = smooth_series(p90_scores, smooth).values
+
+
+        fig.add_trace(go.Scatter(
+            x=np.concatenate([x_vals, x_vals[::-1]]),
+            y=np.concatenate([p90_scores, p10_scores[::-1]]),
+            fill='toself',
+            fillcolor='rgba(0,100,80,0.2)',
+            line=dict(color='rgba(255,255,255,0)'),
+            hoverinfo="skip",
+            showlegend=True,
+            name="10th-90th Percentile"
+        ))
+
+    if mean:
+        mean_scores = df.groupby(xaxis)["score"].mean().sort_index()
+        x_vals = mean_scores.index.values
+        if smooth > 0:
+            mean_scores = smooth_series(mean_scores, smooth).values
+
         trace = go.Scatter(
             x=x_vals,
-            y=y_vals,
+            y=mean_scores,
             mode='lines',
-            name="Run Scores"
+            name="Mean Score",
+            line=dict(dash='dash', width=2, color='black')
         )
         fig.add_trace(trace)
 
-    # Mean score trace (smoothed if requested)
-    mean_scores = df.groupby(xaxis)["score"].mean().sort_index()
-    mean_x = mean_scores.index.values
-    mean_y = mean_scores.values
-    if smooth > 0:
-        mean_y = smooth_series(mean_scores, smooth).values
-    trace = go.Scatter(
-        x=mean_x,
-        y=mean_y,
-        mode='lines',
-        name="Mean Score",
-        line=dict(dash='dash', width=2, color='black')
-    )
-    fig.add_trace(trace)
+    if median:
+        median_scores = df.groupby(xaxis)["score"].median().sort_index()
+        x_vals = median_scores.index.values
+        if smooth > 0:
+            median_scores = smooth_series(median_scores, smooth).values
+
+        trace = go.Scatter(
+            x=x_vals,
+            y=median_scores,
+            mode='lines',
+            name="Median Score",
+            line=dict(dash='dot', width=2, color='red')
+        )
+        fig.add_trace(trace)
 
     fig.update_layout(
         title="Run Scores",
@@ -182,8 +240,9 @@ def _plot_run_minimization(df: pd.DataFrame, xaxis="iter", smooth: float = 0):
         yaxis=dict(range=[0, 1]),
         legend_title="Node" if "node" in df.columns else "Run"
     )
-    fig.show()
-    
+
+    #fig.show()
+    return fig
 
 
 # Example usage:
@@ -196,6 +255,8 @@ class OptRun:
     def __init__(self, run_loc: Path, load_results:bool=True):
         self.dir = run_loc
         self.name = run_loc.name
+        self.experiment_name = self.name.split("_")[0]  # Extract experiment name from the run directory name
+
         self.config = self._get_config()
 
         try:
@@ -335,14 +396,59 @@ class OptRun:
         return cp.make_simulation_preconfig(model=model)
 
 
-    def plot_scores(self, xaxis="iter", smooth=0):
+    def plot_scores(
+        self,
+        xaxis="iter",
+        smooth=0,
+        mean=True,
+        median=False,
+        distributed=True,
+        quantile=None,
+        fig=None
+    ):
+        """
+        Plot the scores of the optimization run.
+        :param xaxis: The x-axis to use for the plot. Options are 'iter' or 'datetime'.
+        :type xaxis: str
+        :param smooth: Smoothing factor between 0 (no smoothing) and 1 (maximum smoothing).
+        :type smooth: float
+        :param mean: Whether to plot the mean score.
+        :type mean: bool
+        :param median: Whether to plot the median score.
+        :type median: bool
+        :param distributed: Whether to plot distributed scores (by node).
+        :type distributed: bool
+        :param quantile: Quantile range to plot (e.g., 0.1 for 10th-90th percentile).
+        :type quantile: float or None
+        :param fig: Optional plotly Figure to add traces to.
+        :type fig: plotly.graph_objs.Figure or None
+        """
+        _plot_run_minimization(
+            self.scores,
+            xaxis=xaxis,
+            smooth=smooth,
+            mean=mean,
+            median=median,
+            distributed=distributed,
+            quantile=quantile,
+            fig=fig
+        )
         """
         Plot the scores of the optimization run.
         :param xaxis: The x-axis to use for the plot. Options are 'iter' or 'datetime'.
         :type xaxis: str
         """
     
-        _plot_run_minimization(self.scores, xaxis=xaxis, smooth=smooth)
+        return _plot_run_minimization(
+            self.scores,
+            xaxis=xaxis,
+            smooth=smooth,
+            mean=mean,
+            median=median,
+            distributed=distributed,
+            quantile=quantile,
+            fig=fig
+        )
 
     def plot_param_changes(self, xaxis="iter"):
         """

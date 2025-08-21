@@ -131,6 +131,7 @@ class CalParam:
                 )
             self.row_index = ROW_INDICES[self.section][self.row_attribute]
 
+
     def make_multi_index(self, model: swmmio.Model) -> pd.MultiIndex:
         """Create multi-index for multi-keyed parameters."""
         index_arrays = [getattr(getattr(model.inp, self.section), key).to_list() for key in self.key]
@@ -363,6 +364,8 @@ class CalParams(list):
         # Convert multiplicative bounds to absolute
         self = self.relative_to_absolute_search_bounds()
 
+        if ~np.any([cp.distributed for cp in self]) and opt.hierarchical:
+            raise ValueError("No distributed parameters found, hierarchical calibration cannot be applied.")
         # Set calibration order based on network topology
         if opt.hierarchical:
             self = self.get_calibration_order(model=model)
@@ -547,8 +550,11 @@ def get_simpreconfig_at_iter(run_dir, iter=None):
                 initial_value = row.initial_value)
         cps.append(cp)
     cps = CalParams(cps)
+
     model_file = str(run_dir.parent.parent / f"{run_dir.parent.parent.stem}_cal.inp")
 
+    
     spc=create_simpreconfig(cps=cps, vals=df.cal_val, model_file=model_file)
+
 
     return spc

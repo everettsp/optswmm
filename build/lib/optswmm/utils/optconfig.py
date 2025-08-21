@@ -13,6 +13,7 @@ from optswmm.utils.standardization import _standardize_file, _validate_target_da
 from optswmm.utils.runutils import initialize_run
 from optswmm.utils.swmmutils import set_model_datetimes
 from optswmm.defs.filenames import DEFAULT_SCORES_FILENAME, DEFAULT_CAL_PARAMS_FILENAME, DEFAULT_PARAMS_FILENAME, DEFAULT_MODEL_FILENAME
+import shutil
 
 
 class OptConfig:
@@ -102,8 +103,21 @@ class OptConfig:
         self.run_dir = initialize_run(self.run_folder, self.name)
         self.results_file_params = self.run_dir / DEFAULT_PARAMS_FILENAME
         self.results_file_scores = self.run_dir / DEFAULT_SCORES_FILENAME
-        self.calibrated_model_file = self.run_dir / DEFAULT_MODEL_FILENAME
+        self.calibrated_model_file = self.model_file.with_name(self.model_file.stem + "_cal.inp")
+        
+        # First, create an "uncalibrated" copy of the model file
+        uncalibrated_model_file = self.model_file.with_name(self.model_file.stem + "_uncal.inp")
+        if uncalibrated_model_file.exists():
+            warnings.warn(f"Uncalibrated model file {uncalibrated_model_file} already exists. It will be overwritten.")
+            uncalibrated_model_file.unlink()
 
+        shutil.copy(self.model_file, uncalibrated_model_file)
+        self.model_file = uncalibrated_model_file
+
+        # Ensure the calibrated model file does not already exist
+        if self.calibrated_model_file.exists():
+            warnings.warn(f"Calibrated model file {self.calibrated_model_file} already exists. It will be overwritten.")
+            self.calibrated_model_file.unlink()
 
         if not self.results_file_scores.exists():
             with open(self.results_file_scores, 'a+') as f:

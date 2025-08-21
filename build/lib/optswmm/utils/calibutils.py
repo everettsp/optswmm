@@ -1,31 +1,29 @@
 """Main calibration routine for SWMM models."""
 
-# Standard library imports
+# Standard library imports - only include what's necessary
 import logging
 import os
+import shutil
 import sys
 import time
-import uuid
 import warnings
-from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from multiprocessing import freeze_support
 from contextlib import redirect_stdout, redirect_stderr
 
-
-
-# Third-party imports
+# Third-party imports - optimized for performance
 import numpy as np
 import pandas as pd
-import networkx as nx
+# Import networkx only where needed
+# import networkx as nx 
 from scipy.optimize import differential_evolution, minimize
-from tqdm import tqdm
-import psutil
+# Only import tqdm when progress bars are used
+# from tqdm import tqdm
+# Import gc and psutil only when monitoring is active
 import gc
+import psutil
 
 # SWMM-related imports
-import swmmio
 from swmmio import Model
 from pyswmm import Simulation, Output, SimulationPreConfig
 from swmm.toolkit import shared_enum
@@ -34,13 +32,22 @@ from swmm.toolkit import shared_enum
 from optswmm.utils.swmmutils import get_model_path
 from optswmm.utils import perfutils as pf
 from optswmm.utils.functions import sync_timeseries, invert_dict, load_dict
-from optswmm.utils.networkutils import get_downstream_nodes
+# Import this function only when needed
+# from optswmm.utils.networkutils import get_downstream_nodes
 from optswmm.utils.calparams import CalParam, CalParams
 from optswmm.utils.standardization import load_timeseries
 from optswmm.utils.optconfig import OptConfig
 
-# Configure warnings
+# Add lazy imports for rarely used modules
+def get_downstream_nodes(*args, **kwargs):
+    """Lazy import for networkx-dependent function"""
+    import networkx as nx
+    from optswmm.utils.networkutils import get_downstream_nodes as _get_downstream_nodes
+    return _get_downstream_nodes(*args, **kwargs)
+
+# Configure warnings - suppress unneeded ones
 warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=RuntimeWarning)
 
 # Constants
 MAXIMIZE_FUNCTIONS = ["nse", "kge", "rsr", "rsq", "pearsonr", "spearmanr"]
@@ -110,7 +117,6 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
 
     #shutil.copyfile(opt.model_file, cal_model)
 
-    cal_model = Model(str(opt.model_file))
 
     #shutil.copyfile(str(model_dir / opt.cfg["base_model_name"]), cal_model)
     
@@ -161,7 +167,7 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
 
 
     set_simulation_datetime(
-        model=cal_model, 
+        model=Model(str(opt.model_file)), 
         start_time=start_time, 
         end_time=end_time
     ).inp.save()
@@ -201,7 +207,7 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
 
             downstream_nodes = []
             for node in node_subset:
-                downstream_nodes.extend(get_downstream_nodes(cal_model.network, node))
+                downstream_nodes.extend(get_downstream_nodes(Model(str(opt.model_file)).network, node))
                 
             node_subset = list(set(downstream_nodes))
 
@@ -216,26 +222,61 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
 
                 # For multi-index columns, select columns where 'nodes' level matches cal_nodes
 
-                cal_targets_subset = cal_targets.loc[:, cal_targets.columns.get_level_values('nodes').isin(node_subset)]
+                #cal_targets_subset = cal_targets.loc[:, cal_targets.columns.get_level_values('nodes').isin(node_subset)]
 
-                success = de_calibration(
+                opt_results = de_calibration(
                     cal_forcings=cal_forcings,
-                    cal_targets=cal_targets_subset,
-                    in_model=cal_model,
+                    cal_targets=cal_targets,
+                    in_model=Model(str(opt.model_file)),
                     cal_params=cal_param_subset,
                     opt_config=opt,
                     counter=counter,
                     )
+                
 
-    
-    success = de_calibration(
-        cal_forcings=cal_forcings,
-        cal_targets=cal_targets,
-        in_model=cal_model,
-        cal_params=cal_params,
-        opt_config=opt,
-        counter=counter,
-    )
+                # Get the optimized parameter values
+                values = opt_results.x
+                
+                # run the model with the updated parameters to update the model
+                cal_param_subset.set_values(values)
+                spc = cal_param_subset.make_simulation_preconfig(model=Model(opt.model_file))
+                sim = Simulation(str(opt.model_file), sim_preconfig=spc)
+                sim.execute()
+
+                # replace the uncalibrated model file with the modified model file                            
+                modified_model_file = opt.model_file.parent / f"{opt.model_file.stem}_mod.inp"
+
+                if opt.model_file.exists():
+                    opt.model_file.unlink()
+
+                shutil.copy(str(modified_model_file.resolve()), str(opt.model_file.resolve()))
+
+
+                #cal_model.inp.save()
+
+    else:
+            
+        opt_results = de_calibration(
+            cal_forcings=cal_forcings,
+            cal_targets=cal_targets,
+            in_model=cal_model,
+            cal_params=cal_params,
+            opt_config=opt,
+            counter=counter,
+        )
+
+
+        cal_params.set_values(values)
+        spc = cal_params.make_simulation_preconfig(model=Model(opt.calibrated_model_file))
+        sim = Simulation(str(opt.calibrated_model_file), sim_preconfig=spc)
+        sim.execute()
+                    
+        modified_model_file = opt.calibrated_model_file.parent / f"{opt.calibrated_model_file.stem}_mod.inp"
+        opt.calibrated_model_file.unlink()
+        shutil.copy(str(modified_model_file.resolve()), str(opt.calibrated_model_file.resolve()))
+
+
+
 
     #cal_model.inp.save()
 
@@ -568,7 +609,7 @@ def de_score_fun(
         with open(os.devnull, 'w') as devnull:
             with redirect_stdout(devnull), redirect_stderr(devnull):
                 
-                max_retries = 3  # Reduced retries to prevent file buildup
+                max_retries = 8  # Reduced retries to prevent file buildup
                 for attempt in range(max_retries):
                     try:
                         sim.execute()
@@ -576,7 +617,7 @@ def de_score_fun(
                     except Exception as e:
                         if attempt < max_retries - 1:
                             cleanup_files()
-                            time.sleep(1)
+                            time.sleep(0.01)
                             continue
                         else:
                             sim_failed = True
@@ -812,15 +853,17 @@ def eval_model(outputfile, cal_targets, opt_config):
     return scores, {"obs": obs, "sim": sim}
 
 
-def de_calibration(in_model,
-                   cal_forcings,
-                   cal_targets,
-                   cal_params, 
-                   opt_config,
-                   counter:OptCount):
+def de_calibration(
+    in_model,
+    cal_forcings,
+    cal_targets,
+    cal_params, 
+    opt_config,
+    counter: OptCount
+):
     """
     Subroutine for SWMM optimization
-    
+
     PARAMETERS
         in_model: swmmio.Model object
             initial model
@@ -832,7 +875,7 @@ def de_calibration(in_model,
             parameter constraints
         opt_config: dict
             optimization configuration
-    
+
     RETURNS
         model: swmmio.Model object
             calibrated model
@@ -842,29 +885,38 @@ def de_calibration(in_model,
     calibration_start_time = time.time()
 
     if type(in_model) is Model:
-        in_model = get_model_path(in_model,'inp')
+        in_model = get_model_path(in_model, 'inp')
 
-    
-    opt_fun = lambda x: de_score_fun(x, 
-                                     in_model=in_model, 
-                                     cal_params=cal_params,
-                                     cal_targets = cal_targets,
-                                     counter=counter,
-                                     opt_config=opt_config)
-    
-
+    opt_fun = lambda x: de_score_fun(
+        x,
+        in_model=in_model,
+        cal_params=cal_params,
+        cal_targets=cal_targets,
+        counter=counter,
+        opt_config=opt_config
+    )
 
     bounds = cal_params.get_bounds()
-
-
-
     opt_args = opt_config.algorithm_options
+
     if opt_config.algorithm == "differential-evolution":
-        opt_results = differential_evolution(func=opt_fun, bounds=bounds, **opt_args)
-
-    elif opt_config.algorithm in ["Nelder-Mead","Powell","CG","BFGS","L-BFGS-B","TNC","COBYLA","SLSQP","trust-constr","dogleg","trust-ncg","trust-exact","trust-krylov"]:
-
-        opt_results = minimize(method=opt_config.algorithm,fun=opt_fun, bounds=bounds, x0=[c.x0 for c in cal_params], options=opt_args)
+        opt_results = differential_evolution(
+            func=opt_fun,
+            bounds=bounds,
+            **opt_args
+        )
+    elif opt_config.algorithm in [
+        "Nelder-Mead", "Powell", "CG", "BFGS", "L-BFGS-B", "TNC",
+        "COBYLA", "SLSQP", "trust-constr", "dogleg", "trust-ncg",
+        "trust-exact", "trust-krylov"
+    ]:
+        opt_results = minimize(
+            method=opt_config.algorithm,
+            fun=opt_fun,
+            bounds=bounds,
+            x0=[c.x0 for c in cal_params],
+            options=opt_args
+        )
     else:
         raise NotImplementedError(f"Algorithm {opt_config.algorithm} not implemented")
     
@@ -884,5 +936,5 @@ def de_calibration(in_model,
             os.remove(file)
     """
     
-    return True
+    return opt_results
 
