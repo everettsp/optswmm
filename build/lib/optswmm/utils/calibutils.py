@@ -259,7 +259,7 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
         opt_results = de_calibration(
             cal_forcings=cal_forcings,
             cal_targets=cal_targets,
-            in_model=cal_model,
+            in_model=Model(str(opt.model_file)),
             cal_params=cal_params,
             opt_config=opt,
             counter=counter,
