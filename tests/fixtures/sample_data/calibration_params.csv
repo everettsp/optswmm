@@ -1,0 +1,8 @@
+section,attribute,element,key,lower,upper,lower_limit,upper_limit,distributed,mode,relative_bounds,col_index,initial_value,opt_value,model_value,row_attribute,row_index,level,ii,active
+subcatchments,Width,,index,0.1,10.0,0.1,10.0,True,direct,True,0,1.0,1.0,1.0,,0,0,0,True
+subcatchments,Area,,index,1.0,10000.0,0.0,10000.0,True,direct,True,1,100.0,100.0,100.0,,0,0,1,True
+conduits,MaxFlow,,index,0.5,5.0,0.0,5.0,True,multiplicative,True,0,1.0,1.0,1.0,,0,0,2,True
+pollutants,InitConcen,,index,0.0,1000.0,0.0,1000.0,False,direct,True,0,10.0,10.0,10.0,,0,0,3,True
+buildup,Coeff1,,index,0.0,1.0,0.0,1.0,False,multiplicative,True,0,0.5,0.5,0.5,,0,0,4,True
+buildup,Coeff2,,index,0.0,1.0,0.0,1.0,False,multiplicative,True,0,0.5,0.5,0.5,,0,0,5,True
+buildup,Coeff3,,index,0.0,1.0,0.0,1.0,False,multiplicative,True,0,0.5,0.5,0.5,,0,0,6,True

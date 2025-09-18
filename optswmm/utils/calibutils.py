@@ -101,8 +101,13 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
     
     #cal_forcings, cal_targets = load_calibration_data(routine=opt.cfg["routine"])
     
+    if opt.forcing_data_file is not None:
+        cal_forcings = load_timeseries(opt.forcing_data_file)
+    else:
+        cal_forcings = None
 
-    cal_forcings = load_timeseries(opt.forcing_data_file)
+
+
     cal_targets = load_timeseries(opt.target_data_file)
 
 
@@ -158,6 +163,7 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
 
     if opt.calibration_start_date is None or opt.calibration_end_date is None:
         start_time, end_time = cal_targets.index[0], cal_targets.index[-1]
+        start_time = start_time - (cal_targets.index[1] - cal_targets.index[0])
         logger.info(f"start_date and end_date not found in config; using calibration target data datetime index: {start_time} to {end_time}.")
 
     else:
@@ -201,19 +207,22 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
 
         #for cal_param in cal_params:
         for level in levels:
-            cal_param_subset = CalParams([c for c in cal_params if c.level == level])
             
+            for c in cal_params:
+                c.active = (c.level == level)
+
+            cal_param_subset = CalParams([c for c in cal_params if c.level == level])
+
             node_subset = np.unique([c.node for c in cal_param_subset]).tolist()
 
-            downstream_nodes = []
-            for node in node_subset:
-                downstream_nodes.extend(get_downstream_nodes(Model(str(opt.model_file)).network, node))
-                
-            node_subset = list(set(downstream_nodes))
-
-
+            if level > 0:
+                downstream_nodes = []
+                for node in node_subset:
+                    downstream_nodes.extend(get_downstream_nodes(Model(str(opt.model_file)).network, node)) 
+                node_subset = list(set(downstream_nodes))
             #node_subset = [node for node in node_subset if node in opt.cfg["calibration_nodes"]]
-            #if "all" in [c.node.lower() for c in cal_param_subset]:
+            #if 
+            # "all" in [c.node.lower() for c in cal_param_subset]:
             #    node_subset = opt.calibration_nodes
 
             if len(node_subset) == 0:
@@ -228,7 +237,7 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
                     cal_forcings=cal_forcings,
                     cal_targets=cal_targets,
                     in_model=Model(str(opt.model_file)),
-                    cal_params=cal_param_subset,
+                    cal_params=cal_params,
                     opt_config=opt,
                     counter=counter,
                     )
@@ -255,7 +264,6 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
                 #cal_model.inp.save()
 
     else:
-            
         opt_results = de_calibration(
             cal_forcings=cal_forcings,
             cal_targets=cal_targets,
@@ -265,16 +273,19 @@ def calibrate(opt_config: Path | str | OptConfig, cal_params: list[CalParam]):
             counter=counter,
         )
 
+        values = opt_results.x
 
+
+        cal_params = CalParams(cal_params)
         cal_params.set_values(values)
-        spc = cal_params.make_simulation_preconfig(model=Model(opt.calibrated_model_file))
-        sim = Simulation(str(opt.calibrated_model_file), sim_preconfig=spc)
+        spc = cal_params.make_simulation_preconfig(model=Model(str(opt.model_file)))
+        sim = Simulation(str(opt.model_file), sim_preconfig=spc)
         sim.execute()
-                    
-        modified_model_file = opt.calibrated_model_file.parent / f"{opt.calibrated_model_file.stem}_mod.inp"
-        opt.calibrated_model_file.unlink()
-        shutil.copy(str(modified_model_file.resolve()), str(opt.calibrated_model_file.resolve()))
 
+        # copy the modified model to the run directory 
+        modified_model_file = opt.model_file.parent / f"{opt.model_file.stem}_mod.inp"
+        calibrated_model = opt_config.run_dir / "calibrated_model.inp"
+        shutil.copy(str(modified_model_file.resolve()), str(calibrated_model.resolve()))
 
 
 
@@ -574,7 +585,7 @@ def de_score_fun(
         cal_params,
         cal_targets,
         counter,
-        opt_config):
+        opt_config,):
     """
     Optimization score function.
     """
@@ -582,9 +593,11 @@ def de_score_fun(
     # Monitor file handles at start
     initial_file_count = get_open_file_count()
     
+    cap_params_subset = CalParams([c for c in cal_params if c.active])
+
     # Set up simulation preconfig with parameter updates
-    cal_params.set_values(values)
-    spc = cal_params.make_simulation_preconfig(model=opt_config.model)
+    cap_params_subset.set_values(values)
+    spc = cap_params_subset.make_simulation_preconfig(model=opt_config.model)
 
     # Run simulation with updated parameters
     outputfile = str(Path(in_model).with_suffix('.out').resolve())
@@ -655,7 +668,6 @@ def de_score_fun(
     
     iter = counter.get_count()
 
-    # Log results to files
     _log_results(score_df, cal_params, iter, opt_config, timeseries_results)
     
     counter.increment()
@@ -721,7 +733,6 @@ def _log_results(score_df, cal_params, iter, opt_config, timeseries_results):
     #os.remove(Path(fname_root + ".rpt"))
     return score_df[opt_config.score_function].mean()
 
-
 def get_simulation_results(outputfile:str|Path, station_ids:list[str], params:list[str]):
         """
         Extract simulation results from SWMM output file for given stations and parameters.
@@ -746,7 +757,7 @@ def get_simulation_results(outputfile:str|Path, station_ids:list[str], params:li
                     elif param in ["stage(m)", "wl(m)"]:
                         res = out.node_series(station_id, shared_enum.NodeAttribute.INVERT_DEPTH)
                     else:
-                        raise ValueError(f"Parameter {param} not recognized")
+                        raise ValueError(f"Parameter {param} not recognized, must be one of ['discharge(cms)', 'flow(cms)', 'stage(m)', 'wl(m)']")
                     dfs.append(
                         pd.DataFrame(
                             index=res.keys(),
@@ -791,6 +802,7 @@ def eval_model(outputfile, cal_targets, opt_config):
 
     PERFORMANCE_FUNCTIONS = [func for func in dir(pf) if callable(getattr(pf, func)) and not func.startswith("_")]
     missing_funcs = [func for func in opt_config.score_function if func not in PERFORMANCE_FUNCTIONS]
+    
     if len(missing_funcs) > 0:
         raise ValueError(f"Performance function {missing_funcs} not recognized")
     
@@ -804,7 +816,6 @@ def eval_model(outputfile, cal_targets, opt_config):
 
     station_ids = np.unique(cal_targets.columns.get_level_values(1))
     params = np.unique(cal_targets.columns.get_level_values(0))
-
     
     params = [p for p in params if p in opt_config.target_variables]
     if len(params) == 0:
@@ -818,7 +829,9 @@ def eval_model(outputfile, cal_targets, opt_config):
 
     sim = df.copy()
 
-    sim, obs = sync_timeseries(sim, obs)
+    sim, obs = sync_timeseries(obs, sim)
+
+
 
     #print(obs.head())
     #sim = get_predictions_at_nodes(model=Model(cal_model_tmp), nodes=eval_nodes, param="FLOW_RATE")
@@ -859,8 +872,7 @@ def de_calibration(
     cal_targets,
     cal_params, 
     opt_config,
-    counter: OptCount
-):
+    counter: OptCount,):
     """
     Subroutine for SWMM optimization
 
@@ -887,13 +899,14 @@ def de_calibration(
     if type(in_model) is Model:
         in_model = get_model_path(in_model, 'inp')
 
+
     opt_fun = lambda x: de_score_fun(
         x,
         in_model=in_model,
         cal_params=cal_params,
         cal_targets=cal_targets,
         counter=counter,
-        opt_config=opt_config
+        opt_config=opt_config,
     )
 
     bounds = cal_params.get_bounds()
@@ -910,11 +923,14 @@ def de_calibration(
         "COBYLA", "SLSQP", "trust-constr", "dogleg", "trust-ncg",
         "trust-exact", "trust-krylov"
     ]:
+        x0 = [c.x0 for c in cal_params if c.active]
+        x0 = cal_params.flatten_values(x0)
+
         opt_results = minimize(
             method=opt_config.algorithm,
             fun=opt_fun,
             bounds=bounds,
-            x0=[c.x0 for c in cal_params],
+            x0=x0,
             options=opt_args
         )
     else:

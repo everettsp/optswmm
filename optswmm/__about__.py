@@ -3,9 +3,9 @@ Package metadata for optswmm.
 """
 
 __title__ = "optswmm"
-__description__ = "Simple package for optimizing SWMM parameters"
+__description__ = "Python package for calibrating SWMM models."
 __url__ = "https://github.com/everettsp/optswmm"
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Everett Snieder"
 __author_email__ = "everett.snieder@gmail.com"
 __license__ = "MIT"

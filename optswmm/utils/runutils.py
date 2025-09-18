@@ -7,31 +7,14 @@ import plotly.graph_objs as go
 import numpy as np
 import warnings
 from swmmio import Model
-
+import shutil
+from pyswmm import Simulation, SimulationPreConfig
 from optswmm.defs.filenames import DEFAULT_SCORES_FILENAME, DEFAULT_CAL_PARAMS_FILENAME, DEFAULT_PARAMS_FILENAME, DEFAULT_MODEL_FILENAME
 from optswmm.utils.calparams import CalParams
-
+from optswmm.utils.fileutils import initialize_run
+from optswmm.utils.optconfig import OptConfig
 
 XAXIS_CHOICES = ["iter", "datetime"]
-
-def initialize_run(run_loc: Path, name: str):
-    """
-    Creates a timestamped run directory to track calibration results.
-
-    :param run_loc: Path to the directory where the run directory will be created.
-    :type run_loc: Path
-    :param name: Name of the calibration routine.
-    :type name: str
-    :returns: Path to the created run directory.
-    :rtype: Path
-    """
-    now = datetime.now()
-    current_time = now.strftime("%d-%m-%y-%H%M%S")
-    run_dir = "run-{}_{}".format(name, current_time)
-    x = Path(os.path.join(run_loc, run_dir))
-    os.mkdir(x)
-    
-    return x
 
 def summarize_runs(runs_dir:Path, drop_incomplte=True) -> list[Path]:
     run_dirs = [dir for dir in runs_dir.iterdir() if dir.is_dir()]
@@ -86,7 +69,6 @@ def summarize_runs(runs_dir:Path, drop_incomplte=True) -> list[Path]:
 import plotly.express as px
 
 
-
 def _plot_param_changes(df, xaxis="iter"):
     # Plot all parameter values over time, colored by parameter name
     if xaxis not in XAXIS_CHOICES:
@@ -104,8 +86,7 @@ def _plot_param_changes(df, xaxis="iter"):
     fig.show()
 
 
-
-def _plot_run_minimization(
+def _get_run_minimization(
     df: pd.DataFrame,
     xaxis="iter",
     smooth: float = 0,
@@ -113,15 +94,10 @@ def _plot_run_minimization(
     median: bool = False,
     distributed: bool = True,
     quantile=None,
-    fig=None
 ):
     """
-    Plot the minimization scores from a DataFrame or directory of runs.
-    :param df: DataFrame containing run scores or path to a directory with run results.
-    :type df: Path, str, or pd.DataFrame
-    :param smooth: Smoothing factor between 0 (no smoothing) and 1 (maximum smoothing).
-    :type smooth: float
-    :raises ValueError: If the DataFrame does not contain 'score' and 'iter' columns or is empty.
+    Compute the minimization series from a DataFrame.
+    Returns a dict with keys: 'distributed', 'mean', 'median', 'quantile'
     """
     if xaxis not in XAXIS_CHOICES:
         raise ValueError(f"xaxis must be one of {XAXIS_CHOICES}")
@@ -130,53 +106,36 @@ def _plot_run_minimization(
         raise ValueError("DataFrame must contain 'score' and 'iter' columns.")
 
     if df.empty:
-        raise ValueError("DataFrame is empty. No runs to plot.")
+        raise ValueError("DataFrame is empty. No runs to process.")
 
     def smooth_series(series, factor):
-        """
-        Smooth a pandas Series using a rolling mean.
-        factor: float between 0 and 1, where 0 = no smoothing, 1 = max smoothing (window = len(series))
-        """
         if not 0 <= factor <= 1:
             raise ValueError("factor must be between 0 and 1")
         window = max(1, int(len(series) * factor))
         return series.rolling(window=window, min_periods=1).mean()
 
-    if fig is None:
-        fig = go.Figure()
+    result = {}
 
+    # Distributed scores
     if distributed:
         if "node" in df.columns:
+            result["distributed"] = []
             for node in df["node"].unique():
                 node_df = df[df["node"] == node].sort_values(xaxis)
                 x_vals = node_df[xaxis].values
                 y_vals = node_df["score"].values
                 if smooth > 0:
                     y_vals = smooth_series(pd.Series(y_vals), smooth).values
-                trace = go.Scatter(
-                    x=x_vals,
-                    y=y_vals,
-                    mode='lines',
-                    name=f"Node: {node}"
-                )
-                fig.add_trace(trace)
+                result["distributed"].append({"name": f"Node: {node}", "x": x_vals, "y": y_vals})
         else:
             df_sorted = df.sort_values(xaxis)
             x_vals = df_sorted[xaxis].values
             y_vals = df_sorted["score"].values
             if smooth > 0:
                 y_vals = smooth_series(pd.Series(y_vals), smooth).values
-            trace = go.Scatter(
-                x=x_vals,
-                y=y_vals,
-                mode='lines',
-                name="Run Scores"
-            )
-            fig.add_trace(trace)
+            result["distributed"] = [{"name": "Run Scores", "x": x_vals, "y": y_vals}]
 
-    # Mean score trace (smoothed if requested)
-    mean_x = df.index.values
-
+    # Quantile range
     if quantile is not None:
         if quantile < 0 or quantile > 1:
             raise ValueError("quantile must be between 0 and 1")
@@ -191,10 +150,74 @@ def _plot_run_minimization(
             p10_scores = smooth_series(p10_scores, smooth).values
             p90_scores = smooth_series(p90_scores, smooth).values
 
+        result["quantile"] = {
+            "x": x_vals,
+            "p10": p10_scores,
+            "p90": p90_scores,
+            "quantile": quantile
+        }
 
+    # Mean score
+    if mean:
+        mean_scores = df.groupby(xaxis)["score"].mean().sort_index()
+        x_vals = mean_scores.index.values
+        if smooth > 0:
+            mean_scores = smooth_series(mean_scores, smooth).values
+        result["mean"] = {"x": x_vals, "y": mean_scores}
+
+    # Median score
+    if median:
+        median_scores = df.groupby(xaxis)["score"].median().sort_index()
+        x_vals = median_scores.index.values
+        if smooth > 0:
+            median_scores = smooth_series(median_scores, smooth).values
+        result["median"] = {"x": x_vals, "y": median_scores}
+
+    return result
+
+
+def _plot_run_minimization(
+    df: pd.DataFrame,
+    xaxis="iter",
+    smooth: float = 0,
+    mean: bool = True,
+    median: bool = False,
+    distributed: bool = True,
+    quantile=None,
+    fig=None
+):
+    """
+    Plot the minimization scores from a DataFrame or directory of runs.
+    """
+    data = _get_run_minimization(
+        df,
+        xaxis=xaxis,
+        smooth=smooth,
+        mean=mean,
+        median=median,
+        distributed=distributed,
+        quantile=quantile,
+    )
+
+    if fig is None:
+        fig = go.Figure()
+
+    # Distributed traces
+    if "distributed" in data:
+        for trace in data["distributed"]:
+            fig.add_trace(go.Scatter(
+                x=trace["x"],
+                y=trace["y"],
+                mode='lines',
+                name=trace["name"]
+            ))
+
+    # Quantile fill
+    if "quantile" in data:
+        q = data["quantile"]
         fig.add_trace(go.Scatter(
-            x=np.concatenate([x_vals, x_vals[::-1]]),
-            y=np.concatenate([p90_scores, p10_scores[::-1]]),
+            x=np.concatenate([q["x"], q["x"][::-1]]),
+            y=np.concatenate([q["p90"], q["p10"][::-1]]),
             fill='toself',
             fillcolor='rgba(0,100,80,0.2)',
             line=dict(color='rgba(255,255,255,0)'),
@@ -203,45 +226,36 @@ def _plot_run_minimization(
             name="10th-90th Percentile"
         ))
 
-    if mean:
-        mean_scores = df.groupby(xaxis)["score"].mean().sort_index()
-        x_vals = mean_scores.index.values
-        if smooth > 0:
-            mean_scores = smooth_series(mean_scores, smooth).values
-
-        trace = go.Scatter(
-            x=x_vals,
-            y=mean_scores,
+    # Mean trace
+    if "mean" in data:
+        m = data["mean"]
+        fig.add_trace(go.Scatter(
+            x=m["x"],
+            y=m["y"],
             mode='lines',
             name="Mean Score",
             line=dict(dash='dash', width=2, color='black')
-        )
-        fig.add_trace(trace)
+        ))
 
-    if median:
-        median_scores = df.groupby(xaxis)["score"].median().sort_index()
-        x_vals = median_scores.index.values
-        if smooth > 0:
-            median_scores = smooth_series(median_scores, smooth).values
-
-        trace = go.Scatter(
-            x=x_vals,
-            y=median_scores,
+    # Median trace
+    if "median" in data:
+        m = data["median"]
+        fig.add_trace(go.Scatter(
+            x=m["x"],
+            y=m["y"],
             mode='lines',
             name="Median Score",
             line=dict(dash='dot', width=2, color='red')
-        )
-        fig.add_trace(trace)
+        ))
 
     fig.update_layout(
         title="Run Scores",
         xaxis_title="Iteration" if xaxis == "iter" else "Datetime",
         yaxis_title="Score",
         yaxis=dict(range=[0, 1]),
-        legend_title="Node" if "node" in df.columns else "Run"
+        legend_title="Node" if ("distributed" in data and len(data["distributed"]) > 1 and "Node" in data["distributed"][0]["name"]) else "Run"
     )
 
-    #fig.show()
     return fig
 
 
@@ -274,14 +288,12 @@ class OptRun:
 
     def _get_config(self):
         """
-        Load the configuration dictionary from the run directory.
+        Load the configuration dictionary from the run directory using OptConfig class method.
         """
         config_file = self.dir / "config.yml"
         if not config_file.exists():
             raise FileNotFoundError(f"Configuration file {config_file} does not exist.")
-        
-        return load_dict(config_file)
-    
+        return OptConfig.from_file(config_file)
 
     def get_timeseries(self, ii=None):
         """
@@ -294,6 +306,9 @@ class OptRun:
         iters_available = [jj.stem.split("_")[1] for jj in iters_available]
 
         iters_available = np.sort(np.array(iters_available, dtype=int))
+
+        if iters_available.size == 0:
+            raise FileNotFoundError(f"No timeseries files found in {timeseries_dir}")
 
         if ii is None:
             ii = iters_available[-1]  # Get the last iteration by default
@@ -310,14 +325,15 @@ class OptRun:
         return obs, sim
     
 
-    def best_iter(self):
+    def get_best_iter(self, available_iters):
         """
         Get the best iteration based on the minimum score.
         """
         if self.scores is None or self.scores.empty:
             raise ValueError("No scores available to determine best iteration.")
-        
-        best_iter = self.scores.groupby("iter")["score"].mean().idxmax()
+        scores = self.scores[self.scores["iter"].isin(available_iters)]
+
+        best_iter = scores.groupby("iter")["score"].mean().idxmax()
         return best_iter
     
     def get_scores(self):
@@ -371,6 +387,177 @@ class OptRun:
         self.params = params
         return params
 
+
+    def _get_param_score_matrix(self):
+        scores = self.scores.set_index("iter")["score"].to_dict()
+        params = self.params.set_index("iter")
+        params = params.join(pd.Series(scores, name="score"))
+
+        # scatter plot with score on x-axis and param_tag on y-axis (with jitter for visibility)
+        params["iter"] = params.index
+
+        df = pd.DataFrame(index=params.index.unique())
+
+        for ii, row in params.iterrows():
+            df.loc[row.name, row.param_tag] = row.physical_val
+            df.loc[row.name, "score"] = row.score
+
+        # move 'score' to the left-most column
+        if "score" in df.columns:
+            df = df[["score"] + [c for c in df.columns if c != "score"]]
+        return df
+
+    def get_param_feature_model(self, regressor="random_forest"):
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.linear_model import LinearRegression
+        from sklearn.model_selection import train_test_split
+
+        REGRESSOR_CHOICES = ["random_forest", "linear", "neural_network"]
+
+        if regressor not in REGRESSOR_CHOICES:
+            raise ValueError(f"regressor must be one of {REGRESSOR_CHOICES}")
+
+        df = self._get_param_score_matrix().dropna()
+        predictors = [c for c in df.columns if c != "score"]
+        X = df[predictors].values
+        y = df["score"].values
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        if regressor == "random_forest":
+            model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+        elif regressor == "linear":
+            model = LinearRegression()
+        elif regressor == "neural_network":
+            from sklearn.neural_network import MLPRegressor
+            model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=1000, random_state=42)
+
+        model.fit(X_train, y_train)
+        return model, predictors, X_test, y_test
+
+
+    def mc_param_search(self, regressor="random_forest", n_samples=10000, random_state=0):
+        """
+        Perform Monte Carlo simulation on parameter space to estimate model score predictions.
+
+        :param regressor: Type of regressor to use ("random_forest", "linear", "neural_network").
+        :type regressor: str
+        :param n_samples: Number of Monte Carlo samples.
+        :type n_samples: int
+        :param random_state: Random seed for reproducibility.
+        :type random_state: int
+        :return: DataFrame with sampled parameters and predicted scores.
+        :rtype: pd.DataFrame
+        """
+
+        # Get trained model and predictors
+        model, predictors, _, _ = self.get_param_feature_model(regressor=regressor)
+
+        # Load calibration parameter bounds
+        cal_params_file = self.dir / "calibration_parameters.csv"
+        if not cal_params_file.exists():
+            raise FileNotFoundError(f"Calibration parameters file {cal_params_file} does not exist.")
+        cal_params = pd.read_csv(cal_params_file, index_col=0)
+
+        # Prepare bounds for each predictor
+        bounds = []
+        for param in predictors:
+            row = cal_params[cal_params["param_tag"] == param]
+            if row.empty:
+                # fallback: use min/max from params
+                vals = self.params[self.params["param_tag"] == param]["cal_val"]
+                bounds.append((vals.min(), vals.max()))
+            else:
+                bounds.append((row["min"].values[0], row["max"].values[0]))
+
+        # Monte Carlo sampling
+        rng = np.random.default_rng(random_state)
+        samples = np.array([rng.uniform(low, high, n_samples) for low, high in bounds]).T
+
+        # Predict scores
+        scores = model.predict(samples)
+
+        # Build result DataFrame
+        df_samples = pd.DataFrame(samples, columns=predictors)
+        df_samples["predicted_score"] = scores
+
+        return df_samples
+
+    def run_monte_carlo_and_get_best_model(self, regressor="random_forest", n_samples=10000, random_state=0):
+        """
+        Run Monte Carlo parameter sensitivity, get the best (lowest predicted score) sample,
+        and create a calibrated model using those parameters.
+
+        :param regressor: Type of regressor to use ("random_forest", "linear", "neural_network").
+        :type regressor: str
+        :param n_samples: Number of Monte Carlo samples.
+        :type n_samples: int
+        :param random_state: Random seed for reproducibility.
+        :type random_state: int
+        :return: Tuple of (best_params: dict, best_score: float, model: Model)
+        """
+        # Run Monte Carlo simulation
+        df_samples = self.mc_param_search(
+            regressor=regressor,
+            n_samples=n_samples,
+            random_state=random_state
+        )
+
+        # Find the best (lowest) predicted score
+        best_idx = df_samples["predicted_score"].idxmin()
+        best_row = df_samples.loc[best_idx]
+        best_params = best_row.drop("predicted_score").to_dict()
+        best_score = best_row["predicted_score"]
+
+        # Load calibration parameter file to get mapping to ii
+        cal_params_file = self.dir / "calibration_parameters.csv"
+        cal_params = pd.read_csv(cal_params_file, index_col=0)
+        param_tags = cal_params["param_tag"].values
+        param_order = [best_params[tag] for tag in param_tags if tag in best_params]
+
+        # Set up CalParams and create simulation preconfig
+        cp = CalParams().from_file(cal_params_file)
+        cp.set_values(param_order)
+
+        # Create a calibrated model (requires base model file from config)
+        base_model_file = self.config.get("model_file")
+        if base_model_file is None:
+            raise ValueError("Base model file not specified in config.")
+        base_model_file = Path(base_model_file)
+        new_model_file = base_model_file.with_name(base_model_file.stem + "_mc_best.inp")
+
+        # Generate the new model
+        spc = cp.make_simulation_preconfig(model=Model(base_model_file))
+        outputfile = str(base_model_file.with_suffix('.out').resolve())
+        with Simulation(str(base_model_file), outputfile=outputfile, sim_preconfig=spc) as sim:
+            sim.execute()
+        modified_file = base_model_file.with_name(base_model_file.stem + "_mod" + base_model_file.suffix)
+        shutil.copy(modified_file, new_model_file)
+        model = Model(str(new_model_file))
+
+        return best_params, best_score, model
+
+
+
+    def get_param_feature_importance(self, regressor="random_forest"):
+        from sklearn.metrics import r2_score, mean_squared_error
+        import numpy as np
+
+        model, predictors, X_test, y_test = self.get_param_feature_model(regressor=regressor)
+        y_pred = model.predict(X_test)
+        r2 = r2_score(y_test, y_pred)
+        mse = mean_squared_error(y_test, y_pred)
+
+        if regressor == "random_forest":
+            feat_imp = pd.Series(model.feature_importances_, index=predictors).sort_values(ascending=True)
+        elif regressor == "linear":
+            feat_imp = pd.Series(np.abs(model.coef_), index=predictors).sort_values(ascending=True)
+        elif regressor == "neural_network":
+            coefs = model.coefs_[0]  # shape: (n_features, n_hidden)
+            feat_imp = pd.Series(np.sum(np.abs(coefs), axis=1), index=predictors).sort_values(ascending=True)
+
+        return {"feature_importances": feat_imp, "r2": r2, "mse": mse}
+
     def load_simulation_preconfig(self, model:Path|Model, iter=None):
         """
         Load simulation preconfiguration for a specified optimization iteration.
@@ -378,23 +565,65 @@ class OptRun:
         :param model: Path to the SWMM model file.
         :type model: Path
         """
-        if iter is None:
-            iter = self.best_iter()
+
 
         # Find the nearest available iteration in self.params["iter"]
 
-        available_iters = np.sort(self.params["iter"].unique())
-        nearest_idx = np.searchsorted(available_iters, iter)
-        if nearest_idx == len(available_iters):
-            nearest_idx -= 1
-        nearest_iter = available_iters[nearest_idx]
-        params = self.params[self.params["iter"] == nearest_iter].copy()
+
+        # here, we need to find the best iteration for each parameter
+        # since some calibration methods don't modify all parameters at each iteration, we need to find the nearest available iteration for each parameter
+
+        unique_params = self.params["param_tag"].unique()
+        params = pd.DataFrame()
+        for param in unique_params:
+            param_subset = self.params[self.params["param_tag"] == param]
+            available_iters = np.sort(param_subset["iter"].unique())
+
+            if iter is None:
+                iter = self.get_best_iter(available_iters)
+
+            nearest_idx = np.searchsorted(available_iters, iter)
+            if nearest_idx == len(available_iters):
+                nearest_idx -= 1
+
+            nearest_iter = available_iters[nearest_idx]
+            param_iter = param_subset[param_subset["iter"] == nearest_iter]
+            params = pd.concat([params, param_iter], ignore_index=True)
 
         cal_params_file = self.dir / "calibration_parameters.csv"
         cp = CalParams().from_df(cal_params_file)
         cp.set_values(params.cal_val.values)
         return cp.make_simulation_preconfig(model=model)
 
+    def get_calibrated_model(self, base_model_file:Path, new_model_file:Path, iter:int|None=None):
+        """
+        Get the calibrated model for a specified optimization iteration.
+
+        :param model: Path to the SWMM model file.
+        :type model: Path
+        """
+
+        if not Path(base_model_file).exists():
+            raise FileNotFoundError(f"Base model file {base_model_file} does not exist.")
+        
+        if not Path(new_model_file).parent.exists():
+            raise FileNotFoundError(f"Directory for new model file {new_model_file} does not exist.")
+        
+        if not Path(new_model_file).suffix == ".inp":
+            raise ValueError(f"New model file {new_model_file} must have .inp extension.")
+        
+        spc = self.load_simulation_preconfig(model=Model(base_model_file), iter=iter)
+
+        # Run simulation with updated parameters
+        outputfile = str(Path(base_model_file).with_suffix('.out').resolve())
+
+        with Simulation(str(base_model_file), outputfile=outputfile, sim_preconfig=spc) as sim:
+            sim.execute()
+
+
+        modified_file = Path(base_model_file).with_name(Path(base_model_file).stem + "_mod" + Path(base_model_file).suffix)
+        shutil.copy(modified_file, new_model_file)
+        return Model(str(new_model_file))    
 
     def plot_scores(
         self,
@@ -422,21 +651,6 @@ class OptRun:
         :type quantile: float or None
         :param fig: Optional plotly Figure to add traces to.
         :type fig: plotly.graph_objs.Figure or None
-        """
-        _plot_run_minimization(
-            self.scores,
-            xaxis=xaxis,
-            smooth=smooth,
-            mean=mean,
-            median=median,
-            distributed=distributed,
-            quantile=quantile,
-            fig=fig
-        )
-        """
-        Plot the scores of the optimization run.
-        :param xaxis: The x-axis to use for the plot. Options are 'iter' or 'datetime'.
-        :type xaxis: str
         """
     
         return _plot_run_minimization(
@@ -482,7 +696,7 @@ class OptRuns:
             
         self.load_results = load_results  # Default to loading results
 
-        self.runs = [OptRun(run_loc=run_dir, load_results=load_results) for run_dir in self.run_dirs]
+        self.runs = [OptRun(run_loc=run_dir, load_results=load_results) for run_dir in self.run_dirs if (run_dir / "config.yml").exists()]
 
         # if loading results, filter results with empty score
         if self.load_results:

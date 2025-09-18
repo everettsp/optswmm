@@ -1,0 +1,9 @@
+,section,attribute,element,key,ii,col_index,lower_rel,upper_rel,lower_abs,upper_abs,lower_limit,upper_limit,distributed,mode,relative_bounds,initial_value,x0,row_index,row_attribute,parent_section,tag,level,node
+0,subcatchments,PercImperv,1,['index'],0,4,-0.99,10,0,100,0,100,True,linear,True,50,"(0.01, 1.05)",0,,subcatchments,subcatchments.PercImperv.1,0,
+1,subcatchments,PercImperv,2,['index'],1,4,-0.99,10,0,100,0,100,True,linear,True,50,"(0.01, 1.05)",0,,subcatchments,subcatchments.PercImperv.2,0,
+2,subcatchments,PercImperv,3,['index'],2,4,-0.99,10,0,100,0,100,True,linear,True,50,"(0.01, 1.05)",0,,subcatchments,subcatchments.PercImperv.3,0,
+3,subcatchments,PercImperv,4,['index'],3,4,-0.99,10,0,100,0,100,True,linear,True,50,"(0.01, 1.05)",0,,subcatchments,subcatchments.PercImperv.4,0,
+4,subcatchments,PercImperv,5,['index'],4,4,-0.99,10,0,100,0,100,True,linear,True,50,"(0.01, 1.05)",0,,subcatchments,subcatchments.PercImperv.5,0,
+5,subcatchments,PercImperv,6,['index'],5,4,-0.99,10,0,100,0,100,True,linear,True,10,"(0.01, 1.05)",0,,subcatchments,subcatchments.PercImperv.6,0,
+6,subcatchments,PercImperv,7,['index'],6,4,-0.99,10,0,100,0,100,True,linear,True,10,"(0.01, 1.05)",0,,subcatchments,subcatchments.PercImperv.7,0,
+7,subcatchments,PercImperv,8,['index'],7,4,-0.99,10,0,100,0,100,True,linear,True,10,"(0.01, 1.05)",0,,subcatchments,subcatchments.PercImperv.8,0,

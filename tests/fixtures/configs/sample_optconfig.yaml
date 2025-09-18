@@ -1,0 +1,15 @@
+algorithm: Differential-Evolution
+algorithm_options:
+  maxiter: 1000
+hierarchical: false
+log_every_n: 1
+model_file: C:\Users\everett\Documents\GitHub\optswmm\tests\fixtures\sample_models\Example1.inp
+normalize: false
+run_folder: C:\Users\everett\Documents\GitHub\optswmm\examples\calibration\runs
+save_timeseries: true
+score_function:
+- kge
+target_data_file: C:\Users\everett\Documents\GitHub\optswmm\tests\fixtures\sample_data\example1_node_inflow.csv
+target_variables:
+- flow(cms)
+warmup_length: 0

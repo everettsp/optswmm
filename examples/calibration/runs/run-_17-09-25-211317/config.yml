@@ -1,0 +1,33 @@
+algorithm: differential-evolution
+algorithm_options:
+  maxiter: '1000'
+calibrated_model_file: C:\Users\everett\Documents\GitHub\optswmm\tests\fixtures\sample_models\Example1_cal.inp
+calibration_end_date: null
+calibration_nodes: null
+calibration_start_date: null
+config_file: C:\Users\everett\Documents\GitHub\optswmm\tests\fixtures\configs\sample_optconfig.yaml
+dry_step: null
+forcing_data_file: null
+hierarchical: 'false'
+ignore_first_n: 0
+log_every_n: 1
+model: null
+model_file: C:\Users\everett\Documents\GitHub\optswmm\tests\fixtures\sample_models\Example1_uncal.inp
+name: ''
+normalize: 'false'
+parallel: 'false'
+report_step: null
+results_file_params: C:\Users\everett\Documents\GitHub\optswmm\examples\calibration\runs\run-_17-09-25-211317\results_params.csv
+results_file_scores: C:\Users\everett\Documents\GitHub\optswmm\examples\calibration\runs\run-_17-09-25-211317\results_scores.txt
+run_dir: C:\Users\everett\Documents\GitHub\optswmm\examples\calibration\runs\run-_17-09-25-211317
+run_folder: C:\Users\everett\Documents\GitHub\optswmm\examples\calibration\runs
+save_timeseries: 'true'
+score_function:
+- kge
+target_data_file: C:\Users\everett\Documents\GitHub\optswmm\tests\fixtures\sample_data\example1_node_inflow.csv
+target_variables:
+- flow(cms)
+validation_end_date: null
+validation_start_date: null
+warmup_length: 0
+wet_step: null

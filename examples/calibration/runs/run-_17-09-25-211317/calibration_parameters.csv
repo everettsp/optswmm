@@ -1,0 +1,2 @@
+,section,attribute,element,key,ii,col_index,lower_rel,upper_rel,lower_abs,upper_abs,lower_limit,upper_limit,distributed,mode,relative_bounds,initial_value,x0,row_index,row_attribute,parent_section,tag,level,node
+0,subcatchments,PercImperv,,['index'],0,4,-0.99,10,0,100,0,100,False,linear,True,[50 50 50 50 50 10 10 10],"(0.01, 1.05)",0,,subcatchments,subcatchments.PercImperv.,0,

@@ -7,7 +7,6 @@ import pandas as pd
 
 from swmmio import Model
 
-from optswmm.utils.swmmutils import get_model_datetimes
 
 def _standardize_ext(ext:str):
     if not isinstance(ext, str):
@@ -155,10 +154,18 @@ def _validate_target_data(tgt:pd.DataFrame | str | Path, model:Model) -> bool:
     model_nodes = model.nodes().index.tolist()
     
     if isinstance(tgt.columns, pd.MultiIndex):
-        
-        if 'nodes' not in tgt.columns.names:
-            raise ValueError("MultiIndex columns must include 'nodes' as one of the levels.")
-        
+        NODE_NAME_OPTIONS = ["node","nodes","station","stations","id","ids"]
+
+        if not any(name in tgt.columns.names for name in NODE_NAME_OPTIONS):
+            raise ValueError(f"MultiIndex columns must include one of the following levels: {NODE_NAME_OPTIONS}")
+        # Standardize the column level name to 'node'
+        level_names = list(tgt.columns.names)
+        for i, name in enumerate(level_names):
+            if name in NODE_NAME_OPTIONS:
+                level_names[i] = 'nodes'
+
+        tgt.columns.set_names(level_names, inplace=True)
+
         tgt_stations = tgt.columns.get_level_values('nodes').unique().to_list()
 
         missing_stations = [station for station in tgt_stations if station not in model_nodes]
@@ -212,10 +219,13 @@ def load_timeseries(file:Path|str|pd.DataFrame):
         if file.suffix == ".pkl":
             df = pd.read_pickle(file)
         elif file.suffix == ".csv":
-            df = pd.read_csv(file, index_col=0, parse_dates=True)
-        else:
-            raise ValueError(f"File {file} not recognized, must be .pkl or .csv")
-    
+            # Check if CSV has multi-index columns
+            df = pd.read_csv(file, header=[0, 1], index_col=0)
+            df.index = pd.to_datetime(df.index, errors='coerce')
+
+        #if pd.to_datetime(df.iloc[:, 0], errors='coerce').notna().all():
+        #    df.set_index(df.columns[0], inplace=True)
+
     elif isinstance(file, pd.DataFrame):
         df = file.copy()
     else:

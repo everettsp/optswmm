@@ -66,9 +66,9 @@ PARAM_INDICES = {
         "RainGage": 1,
         "Outlet": 2,
         "Area": 3,
-        "Width": 4,
-        "PercImperv": 5,
-        "Slope": 6,
+        "PercImperv": 4,
+        "Width": 5,
+        "PercSlope": 6,
         "CurbLength": 7,
         "SnowPack": 8
     },

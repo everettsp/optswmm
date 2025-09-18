@@ -10,7 +10,7 @@ from swmmio import Model
 
 from optswmm.defs import ALGORITHMS
 from optswmm.utils.standardization import _standardize_file, _validate_target_data
-from optswmm.utils.runutils import initialize_run
+from optswmm.utils.fileutils import initialize_run
 from optswmm.utils.swmmutils import set_model_datetimes
 from optswmm.defs.filenames import DEFAULT_SCORES_FILENAME, DEFAULT_CAL_PARAMS_FILENAME, DEFAULT_PARAMS_FILENAME, DEFAULT_MODEL_FILENAME
 import shutil
@@ -127,11 +127,37 @@ class OptConfig:
             with open(self.results_file_params, 'a+') as f:
                 f.write('datetime,iter,ii,model_val,cal_val,physical_val\n')
             
+
+    def get(self, key, default=None):
+        """
+        Get a configuration value by key, with optional default.
+
+        :param key: Attribute name to retrieve.
+        :param default: Value to return if key is not found.
+        :return: Value of the attribute or default.
+        """
+        return getattr(self, key, default)
+
+
     def load_config(self, config_file):
+        if isinstance(config_file, Path):
+            config_file = str(config_file)
+
         """load the configuration file"""
         with open(config_file, 'r') as file:
-            for key, value in yaml.safe_load(file).items():
-                setattr(self, key, value)
+            config = yaml.unsafe_load(file)
+            for key, value in config.items():
+                # Convert known path fields to Path objects if not None
+                if key in [
+                    "config_file", "model_file", "forcing_data_file",
+                    "target_data_file", "run_folder", "run_dir",
+                    "results_file_params", "results_file_scores",
+                    "calibrated_model_file"
+                ] and value is not None:
+                    if isinstance(value, str):
+                        setattr(self, key, Path(value))
+                else:
+                    setattr(self, key, value)
         self._standardize_config()
 
     def _assign_default_opt_options(self):
@@ -150,21 +176,21 @@ class OptConfig:
         if self.model_file is None:
             raise ValueError("Model file must be specified")
         
-        if not self.model_file.exists():
-            raise FileNotFoundError(f"Model file {self.model_file} does not exist.")
+        #if not self.model_file.exists():
+        #    raise FileNotFoundError(f"Model file {self.model_file} does not exist.")
         
         if self.model_file.suffix != ".inp":
             raise ValueError(f"Model file must have extension .inp, got {self.model_file.suffix}")
 
-        for file in [self.forcing_data_file, self.target_data_file]:
+        for file in [self.target_data_file]:
             if file is None:
-                raise ValueError("Forcing data file and target data file must be specified")
-            
+                raise ValueError("Target data file must be specified")
+
             if not file.exists():
-                raise FileNotFoundError(f"Forcing data file {file} does not exist.")
+                raise FileNotFoundError(f"Data file {file} does not exist.")
             
             if file.suffix not in [".pkl", ".csv"]:
-                raise ValueError(f"Forcing data file must have extension .pkl or .csv, got {file.suffix}")
+                raise ValueError(f"Data file must have extension .pkl or .csv, got {file.suffix}")
 
         #if not Path(self.run_dir).exists():
         #    Path(self.run_dir).mkdir()
@@ -187,6 +213,13 @@ class OptConfig:
         if isinstance(self.score_function, str):
             self.score_function = [self.score_function]
         self.score_function = [x.lower() for x in self.score_function]
+
+        # Ensure algorithm case matches ALGORITHMS
+        if isinstance(self.algorithm, str):
+            for alg in ALGORITHMS:
+                if self.algorithm.lower() == alg.lower():
+                    self.algorithm = alg
+                    break
 
         if self.algorithm not in ALGORITHMS:
             raise ValueError(f"Algorithm {self.algorithm} not in {ALGORITHMS}")
@@ -221,7 +254,7 @@ class OptConfig:
             cfg = self.__dict__.copy()
             for key, value in cfg.items():
                 if isinstance(value, Path):
-                    cfg[key] = str(value)
+                    cfg[key] = str(value.resolve())
                 elif isinstance(value, list):
                     cfg[key] = [str(x) for x in value]
                 elif isinstance(value, dict):
@@ -233,6 +266,24 @@ class OptConfig:
                 elif isinstance(value, Model):
                     cfg[key] = None  # Models cannot be serialized directly
             yaml.safe_dump(cfg, file)
+
+    @classmethod
+    def from_file(cls, config_file: Path):
+        """
+        Create an OptConfig instance from a configuration file.
+
+        :param config_file: Path to the configuration file (config.yml)
+        :type config_file: Path
+        :returns: OptConfig instance
+        :rtype: OptConfig
+        """
+        if isinstance(config_file, str):
+            config_file = Path(config_file)
+            
+        if not config_file.exists():
+            raise FileNotFoundError(f"Configuration file {config_file} does not exist.")
+
+        return cls(config_file=config_file)
 
         # def _standardize_config(self):
         #     """standardize the configuration file"""

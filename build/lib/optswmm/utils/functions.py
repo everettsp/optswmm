@@ -88,7 +88,10 @@ def sync_timeseries(ts1: pd.DataFrame, ts2: pd.DataFrame) -> pd.DataFrame:
     :rtype: pd.DataFrame
     :raises ValueError: If no mutual datetimes are found between the two timeseries.
     """
+
+    
     check_same_columns(ts1, ts2)
+    ts2 = ts2[ts1.columns]
 
     # round to nearest minute, since sometimes SWMM results are off by 1 second
     # TODO: figure out why SWMM results are sometimes off by 1 second. The options all seem to be fine.

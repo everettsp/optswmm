@@ -29,6 +29,7 @@ optswmm/utils/__init__.py
 optswmm/utils/archive_calibparams.py
 optswmm/utils/calibutils.py
 optswmm/utils/calparams.py
+optswmm/utils/fileutils.py
 optswmm/utils/functions.py
 optswmm/utils/networkutils.py
 optswmm/utils/optconfig.py
@@ -36,3 +37,9 @@ optswmm/utils/perfutils.py
 optswmm/utils/runutils.py
 optswmm/utils/standardization.py
 optswmm/utils/swmmutils.py
+tests/test_calibutils.py
+tests/test_calparams.py
+tests/test_datasets.py
+tests/test_optconfig.py
+tests/test_runutils.py
+tests/test_swmmutils.py

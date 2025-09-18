@@ -1,0 +1,18 @@
+algorithm: differential-evolution
+algorithm_options:
+  maxiter: 50
+  popsize: 10
+  seed: 42
+end_date: '2023-01-02 23:00:00'
+forcing_data_file: C:\Users\everett\Documents\GitHub\optswmm\examples\tests\fixtures\sample_data\forcing_data.csv
+hierarchical: false
+model_file: C:\Users\everett\Documents\GitHub\optswmm\examples\tests\fixtures\sample_models\basic_model.inp
+normalize: false
+runs_dir: runs
+score_function:
+- nse
+start_date: '2023-01-01 00:00:00'
+target_data_file: C:\Users\everett\Documents\GitHub\optswmm\examples\tests\fixtures\sample_data\observed_data.csv
+target_variables:
+- flow
+warmup_length: 0
